@@ -97,6 +97,85 @@ class Visualizer:
         vis.destroy_window()
         print("图例显示完成")
 
+    def evaluate_partition_quality(self, mesh: o3d.geometry.TriangleMesh, partition_labels: np.ndarray) -> Dict[str, float]:
+        """
+        评估分区质量
+        Args:
+            mesh: 网格对象
+            partition_labels: 分区标签数组
+        Returns:
+            分区质量评估结果
+        """
+        print("评估分区质量...")
+        
+        vertices = np.asarray(mesh.vertices)
+        unique_labels = np.unique(partition_labels)
+        num_partitions = len(unique_labels)
+        
+        # 计算每个分区的统计信息
+        partition_stats = {}
+        for label in unique_labels:
+            partition_vertices = vertices[partition_labels == label]
+            if len(partition_vertices) > 0:
+                # 计算分区大小
+                partition_size = len(partition_vertices)
+                
+                # 计算分区中心点
+                centroid = np.mean(partition_vertices, axis=0)
+                
+                # 计算分区的空间范围
+                min_coords = np.min(partition_vertices, axis=0)
+                max_coords = np.max(partition_vertices, axis=0)
+                extent = max_coords - min_coords
+                
+                # 计算分区内顶点的平均距离
+                distances = np.linalg.norm(partition_vertices - centroid, axis=1)
+                avg_distance = np.mean(distances)
+                
+                partition_stats[label] = {
+                    'size': partition_size,
+                    'centroid': centroid,
+                    'extent': extent,
+                    'avg_distance': avg_distance
+                }
+        
+        # 计算分区质量指标
+        quality_metrics = {}
+        
+        # 1. 分区大小均衡性
+        partition_sizes = [stats['size'] for stats in partition_stats.values()]
+        if partition_sizes:
+            mean_size = np.mean(partition_sizes)
+            std_size = np.std(partition_sizes)
+            size_balance = 1.0 - (std_size / mean_size) if mean_size > 0 else 0.0
+            quality_metrics['size_balance'] = size_balance
+        
+        # 2. 分区空间分布
+        centroids = [stats['centroid'] for stats in partition_stats.values()]
+        if len(centroids) > 1:
+            centroid_distances = []
+            for i in range(len(centroids)):
+                for j in range(i+1, len(centroids)):
+                    distance = np.linalg.norm(centroids[i] - centroids[j])
+                    centroid_distances.append(distance)
+            avg_centroid_distance = np.mean(centroid_distances)
+            quality_metrics['spatial_distribution'] = avg_centroid_distance
+        
+        # 3. 分区数量合理性
+        # 基于网格大小的分区数量评估
+        optimal_partitions = min(100, max(1, len(vertices) // 1000))
+        partition_count_score = 1.0 - abs(num_partitions - optimal_partitions) / optimal_partitions
+        quality_metrics['partition_count'] = max(0.0, partition_count_score)
+        
+        # 4. 总体质量分数
+        quality_metrics['overall_quality'] = np.mean(list(quality_metrics.values())) if quality_metrics else 0.0
+        
+        print("分区质量评估完成:")
+        for metric, value in quality_metrics.items():
+            print(f"  {metric}: {value:.4f}")
+        
+        return quality_metrics
+
     def visualize_partitions_with_midpoints(self, mesh: o3d.geometry.TriangleMesh,
                                            partition_labels: np.ndarray,
                                            edge_midpoints: np.ndarray):
@@ -119,6 +198,9 @@ class Visualizer:
         unique_labels = np.unique(partition_labels)
         num_partitions = len(unique_labels)
         
+        # 评估分区质量
+        quality_metrics = self.evaluate_partition_quality(mesh, partition_labels)
+        
         # 创建颜色映射
         vertex_colors = []
         for label in partition_labels:
@@ -138,10 +220,11 @@ class Visualizer:
 
         # 可视化
         print(f"分区和中点可视化完成: {num_partitions} 个分区, {len(edge_midpoints)} 个中点")
+        print(f"分区质量: {quality_metrics['overall_quality']:.4f}")
         
         # 创建可视化窗口
         vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=f"分区和中点可视化: {num_partitions} 个分区", width=1024, height=768)
+        vis.create_window(window_name=f"分区和中点可视化: {num_partitions} 个分区 (质量: {quality_metrics['overall_quality']:.2f})", width=1024, height=768)
         
         # 添加网格和中点
         vis.add_geometry(new_mesh)

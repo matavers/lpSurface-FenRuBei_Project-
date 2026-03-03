@@ -85,7 +85,7 @@ class SurfaceGenerator:
         
         # 执行密度增加操作
         if density_factor > 1.0:
-            vertices, faces = self._refine_mesh(vertices, faces, func, bounds, parametric, density_factor)
+            vertices, faces = self._refine_mesh(vertices, faces, func, bounds, parametric, density_factor, uv_coords)
         
         # 写入OBJ文件
         with open(output_path, 'w') as f:
@@ -93,9 +93,16 @@ class SurfaceGenerator:
             for v in vertices:
                 f.write(f"v {v[0]} {v[1]} {v[2]}\n")
             
-            # 写入面
+            # 写入面，确保索引有效
+            num_vertices = len(vertices)
             for face in faces:
-                f.write(f"f {face[0]} {face[1]} {face[2]}\n")
+                # 确保面索引在有效范围内
+                v0, v1, v2 = face
+                if v0 <= num_vertices and v1 <= num_vertices and v2 <= num_vertices:
+                    f.write(f"f {v0} {v1} {v2}\n")
+                else:
+                    # 跳过无效的面
+                    print(f"跳过无效面: {face} (顶点数: {num_vertices})")
         
         print(f"曲面生成完成，保存到: {output_path}")
         
@@ -104,7 +111,7 @@ class SurfaceGenerator:
         
         return output_path
     
-    def _refine_mesh(self, vertices, faces, func, bounds, parametric, density_factor):
+    def _refine_mesh(self, vertices, faces, func, bounds, parametric, density_factor, uv_coords=None):
         """
         根据曲率加密网格
         
@@ -115,6 +122,7 @@ class SurfaceGenerator:
             bounds: 边界
             parametric: 是否参数化
             density_factor: 密度调节系数
+            uv_coords: 参数坐标列表
             
         Returns:
             加密后的顶点和面
@@ -141,6 +149,7 @@ class SurfaceGenerator:
         for iteration in range(max_iterations):
             print(f"迭代 {iteration+1}/{max_iterations}...")
             new_vertices = vertices_np.tolist()
+            new_uv_coords = uv_coords.copy() if uv_coords else []
             new_faces = []
             vertex_offset = len(new_vertices)
             
@@ -148,7 +157,13 @@ class SurfaceGenerator:
             refined_count = 0
             
             for face in faces_np:
-                v0, v1, v2 = face
+                # 确保顶点索引是整数
+                v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
+                
+                # 确保顶点索引在有效范围内
+                if v0 >= len(vertices_np) or v1 >= len(vertices_np) or v2 >= len(vertices_np):
+                    print(f"跳过无效面: {face} (顶点数: {len(vertices_np)})")
+                    continue
                 
                 # 计算三角形顶点
                 p0 = vertices_np[v0]
@@ -166,30 +181,67 @@ class SurfaceGenerator:
                              abs(curvatures[v1] - curvatures[v2]) + \
                              abs(curvatures[v2] - curvatures[v0])
                 
-                # 判断是否需要加密
+                # 计算三角形重心
+                centroid = (p0 + p1 + p2) / 3
+                
+                # 计算重心到原点的距离（用于判断是否在两极区域）
+                distance_to_center = np.linalg.norm(centroid)
+                
+                # 两极区域检测（避免在两极过度加密）
+                is_polar_region = False
+                if distance_to_center > 0:
+                    # 计算向量与z轴的夹角
+                    z_component = abs(centroid[2]) / distance_to_center
+                    # 如果夹角小于15度，认为是两极区域
+                    if z_component > np.cos(np.pi / 12):  # 15度
+                        is_polar_region = True
+                
+                # 调整加密阈值，在两极区域使用更大的阈值
                 edge_threshold = 0.2  # 增加边长阈值，从0.1增加到0.2
                 curv_threshold = 0.1  # 曲率变化阈值
                 
+                if is_polar_region:
+                    # 在两极区域增加阈值，减少加密
+                    edge_threshold *= 1.5
+                    curv_threshold *= 1.5
+                
                 if max_edge > edge_threshold or curv_change > curv_threshold:
-                    # 计算重心
-                    centroid = (p0 + p1 + p2) / 3
-                    
                     # 计算重心处的参数坐标
-                    if parametric:
+                    new_u, new_v = 0.0, 0.0
+                    if parametric and uv_coords:
                         # 对于参数化曲面，使用顶点的参数坐标来计算重心处的参数
-                        # 首先找到顶点对应的参数坐标
-                        # 这里简化处理，使用三角形顶点的平均参数坐标
-                        # 注意：这需要在generate_surface方法中存储参数坐标并传递给_refine_mesh
-                        # 为了简化，这里使用重心处的坐标作为参数
-                        # 更好的方法是实现参数坐标的插值
-                        u, v = centroid[0], centroid[1]
-                        x, y, z = func(u, v)
+                        # 获取三角形三个顶点的参数坐标
+                        v0_idx = v0
+                        v1_idx = v1
+                        v2_idx = v2
+                        
+                        # 确保索引在有效范围内
+                        if v0_idx < len(uv_coords) and v1_idx < len(uv_coords) and v2_idx < len(uv_coords):
+                            u0, v0_uv = uv_coords[v0_idx]
+                            u1, v1_uv = uv_coords[v1_idx]
+                            u2, v2_uv = uv_coords[v2_idx]
+                            
+                            # 计算参数坐标的重心
+                            new_u = (u0 + u1 + u2) / 3
+                            new_v = (v0_uv + v1_uv + v2_uv) / 3
+                            
+                            # 确保参数在有效范围内
+                            (u_min, u_max), (v_min, v_max) = bounds
+                            new_u = max(u_min, min(u_max, new_u))
+                            new_v = max(v_min, min(v_max, new_v))
+                            
+                            x, y, z = func(new_u, new_v)
+                        else:
+                            # 如果索引无效，使用空间重心
+                            x, y, z = centroid
                     else:
                         x, y = centroid[0], centroid[1]
                         z = func(x, y)
                     
                     new_vertex = (x, y, z)
                     new_vertices.append(new_vertex)
+                    if uv_coords:
+                        new_uv_coords.append((new_u, new_v))
                     
                     # 分割三角形为三个小三角形
                     new_faces.append([v0, v1, vertex_offset])
@@ -199,11 +251,13 @@ class SurfaceGenerator:
                     refined_count += 1
                 else:
                     # 不需要加密，保留原三角形
-                    new_faces.append(face.tolist())
+                    new_faces.append([v0, v1, v2])
             
             # 更新顶点和面
             vertices_np = np.array(new_vertices)
-            faces_np = np.array(new_faces)
+            faces_np = np.array(new_faces, dtype=int)
+            if uv_coords:
+                uv_coords = new_uv_coords
             
             print(f"  迭代完成，加密了 {refined_count} 个三角形")
             print(f"  当前顶点数: {len(vertices_np)}, 面数: {len(faces_np)}")
@@ -241,7 +295,8 @@ class SurfaceGenerator:
         # 预处理：构建顶点到面的映射
         vertex_to_faces = [[] for _ in range(n_vertices)]
         for i, face in enumerate(faces):
-            v0, v1, v2 = face
+            # 确保面索引是整数
+            v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
             vertex_to_faces[v0].append(i)
             vertex_to_faces[v1].append(i)
             vertex_to_faces[v2].append(i)
@@ -249,7 +304,7 @@ class SurfaceGenerator:
         # 构建顶点邻接关系
         adjacency = [[] for _ in range(n_vertices)]
         for face in faces:
-            v0, v1, v2 = face
+            v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
             adjacency[v0].append(v1)
             adjacency[v0].append(v2)
             adjacency[v1].append(v0)
@@ -311,7 +366,8 @@ class SurfaceGenerator:
         # 计算每个面的法向量
         normals = []
         for face in vertex_faces:
-            v0, v1, v2 = face
+            # 确保面索引是整数
+            v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
             p0 = vertices[v0]
             p1 = vertices[v1]
             p2 = vertices[v2]
@@ -335,7 +391,7 @@ class SurfaceGenerator:
         else:
             return np.array([0, 0, 1])
     
-    def generate_sphere(self, radius=1.0, resolution=50, output_path="sphere.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0):
+    def generate_sphere(self, radius=1.0, resolution=50, output_path="sphere.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0, uniform_density=True):
         """
         生成球体的OBJ文件
         
@@ -346,6 +402,7 @@ class SurfaceGenerator:
             density_factor: 密度调节系数
             visualize_as_point_cloud: 是否以点云形式可视化
             point_cloud_downsample: 点云下采样因子，0.0表示不采样
+            uniform_density: 是否使用均匀密度分布
             
         Returns:
             str: 生成的OBJ文件路径
@@ -353,7 +410,12 @@ class SurfaceGenerator:
         def sphere_func(u, v):
             # 参数化球体
             theta = 2 * np.pi * u
-            phi = np.pi * v
+            if uniform_density:
+                # 使用改进的参数化方法，减少两极密度
+                # 将v从[0,1]映射到[0,π]，使用sin(phi/2)来均匀分布点
+                phi = 2 * np.arcsin(np.sqrt(v))
+            else:
+                phi = np.pi * v
             x = radius * np.sin(phi) * np.cos(theta)
             y = radius * np.sin(phi) * np.sin(theta)
             z = radius * np.cos(phi)
