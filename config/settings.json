@@ -1,0 +1,19 @@
+{
+    "tool": {
+        "type": "ellipsoidal",
+        "semi_axes": [9.0, 3.0],
+        "shank_diameter": 6.0
+    },
+    "machining": {
+        "scallop_height": 0.4,
+        "feed_rate": 200.0,
+        "spindle_speed": 8000.0
+    },
+    "algorithm": {
+        "leiden_resolution": 1.0,
+        "smoothing_lambda": 0.5,
+        "max_iterations": 100,
+        "tolerance": 1e-4,
+        "tar_sampling_resolution": 30
+    }
+}
