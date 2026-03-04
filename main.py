@@ -158,147 +158,206 @@ class FiveAxisMachiningSystem:
 
     def load_mesh_from_file(self, input_path, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None):
         """从文件加载网格或生成曲面网格"""
-        # 处理曲面函数生成
-        if surface_func:
-            print(f"使用曲面函数: {surface_func}")
-            from core.surfaceGenerator import SurfaceGenerator
-            generator = SurfaceGenerator()
-            
-            resolution = surface_params.get('resolution', 50)
-            
-            if surface_func == "sphere":
-                # 生成球体
-                sphere_path = generator.generate_sphere(
-                    radius=10.0,
-                    resolution=resolution,
-                    output_path="temp_sphere.obj",
-                    density_factor=1.0
-                )
-                input_path = sphere_path
-            elif surface_func == "torus":
-                # 生成圆环
-                torus_path = generator.generate_torus(
-                    radius=10.0,
-                    tube_radius=3.0,
-                    resolution=resolution,
-                    output_path="temp_torus.obj",
-                    density_factor=1.0
-                )
-                input_path = torus_path
-            elif surface_func == "saddle":
-                # 生成马鞍面
-                saddle_path = generator.generate_saddle(
-                    resolution=resolution,
-                    scale=10.0,
-                    output_path="temp_saddle.obj",
-                    density_factor=1.0
-                )
-                input_path = saddle_path
-            else:
-                raise ValueError(f"不支持的曲面函数: {surface_func}")
-        
-        # 检查文件是否存在
-        if not os.path.exists(input_path):
-            raise ValueError(f"文件不存在: {input_path}")
-
-        print(f"加载网格: {input_path}")
-        # 使用Open3D加载网格
-        self.mesh = o3d.io.read_triangle_mesh(input_path, True)
-        
-        # 检查网格是否有效
-        if len(self.mesh.vertices) == 0 or len(self.mesh.triangles) == 0:
-            raise ValueError("加载的网格无效")
-        
-        # 计算法线
-        print("计算网格法线...")
-        self.mesh.compute_vertex_normals()
-        self.mesh.compute_triangle_normals()
-
-        # 简化网格
-        if len(self.mesh.vertices) > 10000:
-            print("网格顶点数量过多，自动简化网格...")
-            self.mesh = self.mesh.simplify_vertex_clustering(
-                voxel_size=0.1,
-                contraction=o3d.geometry.SimplificationContraction.Average
-            )
-            print(f"网格简化完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
-
-        # 根据选择的算法处理网格
-        print(f"使用网格生成算法: {mesh_algorithm}")
-        
+        # 当mesh_algorithm为obj时，直接使用OBJ文件，跳过曲面函数生成和采样步骤
         if mesh_algorithm == "obj":
+            # 检查文件是否存在
+            if not os.path.exists(input_path):
+                raise ValueError(f"文件不存在: {input_path}")
+
+            print(f"加载网格: {input_path}")
+            # 使用Open3D加载网格
+            self.mesh = o3d.io.read_triangle_mesh(input_path, True)
+            
+            # 检查网格是否有效
+            if len(self.mesh.vertices) == 0 or len(self.mesh.triangles) == 0:
+                raise ValueError("加载的网格无效")
+
+            # 计算法线
+            print("计算网格法线...")
+            self.mesh.compute_vertex_normals()
+            self.mesh.compute_triangle_normals()
+
+            # 简化网格
+            if len(self.mesh.vertices) > 10000:
+                print("网格顶点数量过多，自动简化网格...")
+                self.mesh = self.mesh.simplify_vertex_clustering(
+                    voxel_size=0.1,
+                    contraction=o3d.geometry.SimplificationContraction.Average
+                )
+                print(f"网格简化完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+
+            # 可视化当前操作的网格
+            print("可视化当前操作的网格...")
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name="当前操作网格")
+            vis.add_geometry(self.mesh)
+            print("按ESC键关闭可视化窗口...")
+            vis.run()
+            vis.destroy_window()
+
             # 直接使用OBJ文件，不进行重建
-            print("直接使用OBJ文件...")
-        elif mesh_algorithm == "bpa":
-            # Ball Pivoting Algorithm
-            print("使用Ball Pivoting Algorithm (BPA)重建网格...")
-            # 转换为点云
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = self.mesh.vertices
-            pcd.normals = self.mesh.vertex_normals
+            print("直接使用OBJ文件，跳过采样步骤...")
+        else:
+            # 处理曲面函数生成
+            if surface_func:
+                print(f"使用曲面函数: {surface_func}")
+                from core.surfaceGenerator import SurfaceGenerator
+                generator = SurfaceGenerator()
+                
+                resolution = surface_params.get('resolution', 50)
+                
+                if surface_func == "sphere":
+                    # 生成球体
+                    sphere_path = generator.generate_sphere(
+                        radius=10.0,
+                        resolution=resolution,
+                        output_path="temp_sphere.obj",
+                        density_factor=1.0
+                    )
+                    input_path = sphere_path
+                elif surface_func == "torus":
+                    # 生成圆环
+                    torus_path = generator.generate_torus(
+                        radius=10.0,
+                        tube_radius=3.0,
+                        resolution=resolution,
+                        output_path="temp_torus.obj",
+                        density_factor=1.0
+                    )
+                    input_path = torus_path
+                elif surface_func == "saddle":
+                    # 生成马鞍面
+                    saddle_path = generator.generate_saddle(
+                        resolution=resolution,
+                        scale=10.0,
+                        output_path="temp_saddle.obj",
+                        density_factor=1.0
+                    )
+                    input_path = saddle_path
+                else:
+                    raise ValueError(f"不支持的曲面函数: {surface_func}")
             
-            # 如果没有法线，计算法线
-            if not pcd.has_normals():
-                pcd.estimate_normals()
-                pcd.orient_normals_consistent_tangent_plane(10)
+            # 检查文件是否存在
+            if not os.path.exists(input_path):
+                raise ValueError(f"文件不存在: {input_path}")
+
+            print(f"加载网格: {input_path}")
+            # 使用Open3D加载网格
+            self.mesh = o3d.io.read_triangle_mesh(input_path, True)
             
-            # 使用BPA重建
-            radii = [0.005, 0.01, 0.02, 0.04]
-            self.mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                pcd, o3d.utility.DoubleVector(radii)
-            )
-            print(f"BPA网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+            # 检查网格是否有效
+            if len(self.mesh.vertices) == 0 or len(self.mesh.triangles) == 0:
+                raise ValueError("加载的网格无效")
+
+            # 计算法线
+            print("计算网格法线...")
+            self.mesh.compute_vertex_normals()
+            self.mesh.compute_triangle_normals()
+
+            # 简化网格
+            if len(self.mesh.vertices) > 10000:
+                print("网格顶点数量过多，自动简化网格...")
+                self.mesh = self.mesh.simplify_vertex_clustering(
+                    voxel_size=0.1,
+                    contraction=o3d.geometry.SimplificationContraction.Average
+                )
+                print(f"网格简化完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+
+            # 根据选择的算法处理网格（采样构造网格）
+            print(f"使用网格生成算法: {mesh_algorithm}")
             
-        elif mesh_algorithm == "poisson":
-            # Poisson Reconstruction
-            print("使用Poisson Reconstruction重建网格...")
-            # 转换为点云
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = self.mesh.vertices
-            pcd.normals = self.mesh.vertex_normals
+            if mesh_algorithm == "bpa":
+                # Ball Pivoting Algorithm
+                print("使用Ball Pivoting Algorithm (BPA)重建网格...")
+                # 转换为点云
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = self.mesh.vertices
+                pcd.normals = self.mesh.vertex_normals
+                
+                # 如果没有法线，计算法线
+                if not pcd.has_normals():
+                    pcd.estimate_normals()
+                    pcd.orient_normals_consistent_tangent_plane(10)
+                
+                # 使用BPA重建
+                radii = [0.005, 0.01, 0.02, 0.04]
+                try:
+                    # 尝试获取密度信息
+                    self.mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                        pcd, o3d.utility.DoubleVector(radii)
+                    )
+                    print(f"BPA网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+                except ValueError:
+                    # 如果只返回一个对象
+                    self.mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                        pcd, o3d.utility.DoubleVector(radii)
+                    )
+                    print(f"BPA网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+            elif mesh_algorithm == "poisson":
+                # Poisson Reconstruction
+                print("使用Poisson Reconstruction重建网格...")
+                # 转换为点云
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = self.mesh.vertices
+                pcd.normals = self.mesh.vertex_normals
+                
+                # 如果没有法线，计算法线
+                if not pcd.has_normals():
+                    pcd.estimate_normals()
+                    pcd.orient_normals_consistent_tangent_plane(10)
+                
+                # 使用Poisson重建
+                try:
+                    # 尝试获取密度信息
+                    self.mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        pcd, depth=9
+                    )
+                    print(f"Poisson网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+                except ValueError:
+                    # 如果只返回一个对象
+                    self.mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        pcd, depth=9
+                    )
+                    print(f"Poisson网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+            elif mesh_algorithm == "tsdf":
+                # TSDF / Signed Distance Field
+                print("使用TSDF/Signed Distance Field重建网格...")
+                # 转换为点云
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = self.mesh.vertices
+                pcd.normals = self.mesh.vertex_normals
+                
+                # 如果没有法线，计算法线
+                if not pcd.has_normals():
+                    pcd.estimate_normals()
+                    pcd.orient_normals_consistent_tangent_plane(10)
+                
+                # 使用体素格重建（TSDF的一种实现）
+                voxel_size = 0.01
+                self.mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_voxel_grid(
+                    pcd, voxel_size
+                )
+                print(f"TSDF网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+            elif mesh_algorithm == "delaunay_cocone":
+                # Delaunay + Cocone
+                print("使用Delaunay + Cocone重建网格...")
+                # 转换为点云
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = self.mesh.vertices
+                
+                # 使用Delaunay三角剖分
+                # Open3D的凸包算法基于Delaunay三角剖分
+                self.mesh, _ = pcd.compute_convex_hull()
+                print(f"Delaunay + Cocone网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
             
-            # 如果没有法线，计算法线
-            if not pcd.has_normals():
-                pcd.estimate_normals()
-                pcd.orient_normals_consistent_tangent_plane(10)
-            
-            # 使用Poisson重建
-            self.mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                pcd, depth=9
-            )
-            print(f"Poisson网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
-            
-        elif mesh_algorithm == "tsdf":
-            # TSDF / Signed Distance Field
-            print("使用TSDF/Signed Distance Field重建网格...")
-            # 转换为点云
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = self.mesh.vertices
-            pcd.normals = self.mesh.vertex_normals
-            
-            # 如果没有法线，计算法线
-            if not pcd.has_normals():
-                pcd.estimate_normals()
-                pcd.orient_normals_consistent_tangent_plane(10)
-            
-            # 使用体素格重建（TSDF的一种实现）
-            voxel_size = 0.01
-            self.mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_voxel_grid(
-                pcd, voxel_size
-            )
-            print(f"TSDF网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
-            
-        elif mesh_algorithm == "delaunay_cocone":
-            # Delaunay + Cocone
-            print("使用Delaunay + Cocone重建网格...")
-            # 转换为点云
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = self.mesh.vertices
-            
-            # 使用Delaunay三角剖分
-            # Open3D的凸包算法基于Delaunay三角剖分
-            self.mesh, _ = pcd.compute_convex_hull()
-            print(f"Delaunay + Cocone网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+            # 可视化当前操作的网格（采样效果）
+            print("可视化当前操作的网格（采样效果）...")
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name="当前操作网格（采样效果）")
+            vis.add_geometry(self.mesh)
+            print("按ESC键关闭可视化窗口...")
+            vis.run()
+            vis.destroy_window()
         
         print(f"最终网格: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
         
@@ -929,46 +988,106 @@ class FiveAxisMachiningSystem:
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) > 1:
-        input_path = sys.argv[1]
-        
-        # 解析命令行参数
-        partition_only = False
-        mesh_algorithm = "delaunay_cocone"  # 默认使用Delaunay + Cocone算法
-        surface_func = None
-        surface_params = {}
-        
-        for arg in sys.argv[2:]:
-            if arg == "--partition-only":
-                partition_only = True
-            elif arg.startswith("--mesh-algorithm="):
-                mesh_algorithm = arg.split("=")[1]
-            elif arg.startswith("--surface="):
-                surface_func = arg.split("=")[1]
-            elif arg.startswith("--resolution="):
-                surface_params['resolution'] = int(arg.split("=")[1])
-        
-        system = FiveAxisMachiningSystem()
-        
-        # 检查是否指定了只运行分区
-        if partition_only:
-            success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
-        else:
-            success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
-        
-        if success:
-            print("处理完成!")
-        else:
-            print("处理失败，请查看控制台输出")
-    else:
-        print("请提供输入路径作为参数")
-        print("用法: python main.py <input_path> [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>]")
+    # 解析命令行参数
+    partition_only = False
+    mesh_algorithm = "delaunay_cocone"  # 默认使用Delaunay + Cocone算法
+    surface_func = None
+    surface_params = {}
+    input_path = None
+    
+    for arg in sys.argv[1:]:
+        if arg == "--partition-only":
+            partition_only = True
+        elif arg.startswith("--mesh-algorithm="):
+            mesh_algorithm = arg.split("=")[1]
+        elif arg.startswith("--surface="):
+            surface_func = arg.split("=")[1]
+        elif arg.startswith("--resolution="):
+            surface_params['resolution'] = int(arg.split("=")[1])
+        elif arg.startswith("--path="):
+            input_path = arg.split("=")[1]
+    
+    # 验证参数组合
+    # 1. --path只能与--mesh-algorithm=obj共存
+    if input_path and mesh_algorithm != "obj":
+        print("错误: --path参数只能与--mesh-algorithm=obj共存")
+        # 显示用法说明
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
         print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
         print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
         print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率")
+        print("  --resolution: 曲面采样分辨率，默认值: 50")
+        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+        sys.exit(1)
+    
+    # 2. --surface只能与--mesh-algorithm=算法名称（非obj）共存
+    if surface_func and mesh_algorithm == "obj":
+        print("错误: --surface参数不能与--mesh-algorithm=obj共存")
+        # 显示用法说明
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+        print("  --resolution: 曲面采样分辨率，默认值: 50")
+        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+        sys.exit(1)
+    
+    # 3. 当--mesh-algorithm=obj时，必须指定--path
+    if mesh_algorithm == "obj" and not input_path:
+        print("错误: 当--mesh-algorithm=obj时，必须指定--path参数")
+        # 显示用法说明
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+        print("  --resolution: 曲面采样分辨率，默认值: 50")
+        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+        sys.exit(1)
+    
+    # 4. 当使用--surface时，不需要指定--path
+    if surface_func and input_path:
+        print("错误: 当使用--surface参数时，不需要指定--path参数")
+        # 显示用法说明
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+        print("  --resolution: 曲面采样分辨率，默认值: 50")
+        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+        sys.exit(1)
+    
+    # 5. 当既没有--path也没有--surface时，使用默认曲面
+    if not input_path and not surface_func:
+        print("错误: 必须指定--path参数或--surface参数")
+        # 显示用法说明
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+        print("  --resolution: 曲面采样分辨率，默认值: 50")
+        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
         # 示例用法
-        print("示例: python main.py test_sphere.obj")
-        print("示例: python main.py test_sphere.obj --partition-only")
-        print("示例: python main.py sphere --mesh-algorithm=bpa --surface=sphere --resolution=50")
-        print("示例: python main.py torus --mesh-algorithm=poisson --surface=torus --resolution=100")
+        print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj")
+        print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only")
+        print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --resolution=50")
+        print("说明:")
+        print("  1. 当 --mesh-algorithm=obj 时，必须指定--path参数，直接使用OBJ文件，跳过采样步骤")
+        print("  2. 当指定 --surface 参数时，会根据曲面函数生成网格，不能与--path参数同时使用")
+        print("  3. 曲面方程直接在代码中定义，无需通过命令行传入")
+        print("  4. 有默认值的参数若没有指定，采用默认值")
+        print("  5. 若--mesh-algorithm为obj才采用.obj文件，跳过采样步骤")
+        print("  6. 若为其他算法名称则采样构造网格，随后再进行其他步骤")
+        sys.exit(1)
+    
+    system = FiveAxisMachiningSystem()
+    
+    # 检查是否指定了只运行分区
+    if partition_only:
+        success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
+    else:
+        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
+    
+    if success:
+        print("处理完成!")
+    else:
+        print("处理失败，请查看控制台输出")

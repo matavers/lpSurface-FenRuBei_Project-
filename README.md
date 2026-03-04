@@ -12,6 +12,9 @@
 - 修复各种错误，确保程序稳定运行
 - 优化性能，使用并行计算加速邻接矩阵构建
 - 添加run_partition_only模式，只运行分区并保存数据
+- 更新命令行参数，使用--path参数指定OBJ文件路径
+- 添加网格可视化功能，在执行核心算法前可视化当前操作的网格
+- 优化参数验证逻辑，确保参数组合的正确性
 
 ## 项目结构
 
@@ -80,12 +83,20 @@
 1. 准备网格文件（支持.obj格式）
 2. 运行主程序：
    ```bash
-   python main.py path/to/mesh.obj
+   # 使用曲面函数生成网格
+   python main.py --surface=sphere
+   
+   # 直接使用OBJ文件
+   python main.py --mesh-algorithm=obj --path=test_sphere.obj
    ```
 
 3. 只运行分区并保存数据：
    ```bash
-   python main.py path/to/mesh.obj --partition-only
+   # 使用曲面函数
+   python main.py --surface=sphere --partition-only
+   
+   # 直接使用OBJ文件
+   python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only
    ```
 
 ### 命令行参数
@@ -98,37 +109,46 @@
 | `--mesh-algorithm` | 网格生成算法 | delaunay_cocone, bpa, poisson, tsdf, obj | delaunay_cocone |
 | `--surface` | 曲面函数名称 | sphere, torus, saddle | 无 |
 | `--resolution` | 曲面采样分辨率 | 整数 | 50 |
+| `--path` | OBJ文件路径（仅与--mesh-algorithm=obj共存） | 文件路径 | 无 |
+
+### 参数验证规则
+
+- `--path` 只能与 `--mesh-algorithm=obj` 共存
+- `--surface` 只能与非 obj 算法共存
+- 当 `--mesh-algorithm=obj` 时，必须指定 `--path`
+- 当使用 `--surface` 时，不能指定 `--path`
+- 必须指定 `--path` 或 `--surface` 中的一个
 
 ### 使用示例
 
-1. 使用默认算法处理OBJ文件：
+1. 使用默认算法和曲面函数：
    ```bash
-   python main.py test_sphere.obj
+   python main.py --surface=sphere
    ```
 
-2. 使用指定算法：
+2. 使用指定算法和曲面函数：
    ```bash
-   python main.py test_sphere.obj --mesh-algorithm=bpa
+   python main.py --surface=sphere --mesh-algorithm=bpa --resolution=50
    ```
 
-3. 使用曲面函数生成网格：
+3. 直接使用OBJ文件（不进行重建）：
    ```bash
-   python main.py sphere --surface=sphere --resolution=50
+   python main.py --mesh-algorithm=obj --path=test_sphere.obj
    ```
 
-4. 直接使用OBJ文件（不进行重建）：
+4. 只运行分区（使用曲面函数）：
    ```bash
-   python main.py test_sphere.obj --mesh-algorithm=obj
+   python main.py --surface=sphere --partition-only
    ```
 
-5. 只运行分区：
+5. 只运行分区（直接使用OBJ文件）：
    ```bash
-   python main.py test_sphere.obj --partition-only
+   python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only
    ```
 
 6. 综合使用多个参数：
    ```bash
-   python main.py torus --surface=torus --mesh-algorithm=poisson --resolution=100 --partition-only
+   python main.py --surface=torus --mesh-algorithm=poisson --resolution=100 --partition-only
    ```
 
 ### 测试程序
@@ -178,7 +198,8 @@ python utils/visualize_results.py
 9. **曲面生成**：生成自定义曲面的OBJ文件，支持多种预设曲面
 10. **边缘中点提取**：提取分区边缘的中点，用于可视化和后续处理
 11. **可视化**：在一个窗口中显示颜色块标示的分区和中点，优化边缘显示
-12. **分区结果保存和加载**：支持将分区结果保存到文件并加载
+12. **网格可视化**：在执行核心算法前可视化当前操作的网格，确认采样效果
+13. **分区结果保存和加载**：支持将分区结果保存到文件并加载
 
 ## 系统配置
 
