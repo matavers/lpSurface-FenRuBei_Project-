@@ -15,6 +15,8 @@
 - 更新命令行参数，使用--path参数指定OBJ文件路径
 - 添加网格可视化功能，在执行核心算法前可视化当前操作的网格
 - 优化参数验证逻辑，确保参数组合的正确性
+- 实现直纹面拟合功能，根据逼近误差阈值确定直纹面类型
+- 添加--developable-fit和--developable-error命令行参数，控制直纹面拟合功能
 
 ## 项目结构
 
@@ -110,6 +112,8 @@
 | `--surface` | 曲面函数名称 | sphere, torus, saddle | 无 |
 | `--resolution` | 曲面采样分辨率 | 整数 | 50 |
 | `--path` | OBJ文件路径（仅与--mesh-algorithm=obj共存） | 文件路径 | 无 |
+| `--developable-fit` | 开启直纹面逼近功能，不计算刀具路径 | - | 无 |
+| `--developable-error` | 直纹面逼近误差阈值 | 浮点数 | 0.01 |
 
 ### 参数验证规则
 
@@ -118,6 +122,8 @@
 - 当 `--mesh-algorithm=obj` 时，必须指定 `--path`
 - 当使用 `--surface` 时，不能指定 `--path`
 - 必须指定 `--path` 或 `--surface` 中的一个
+- 如果指定 `--developable-fit`，则开启直纹面逼近功能，不计算刀具路径
+- 如果计算刀具路径，则不逼近直纹面
 
 ### 使用示例
 
@@ -149,6 +155,16 @@
 6. 综合使用多个参数：
    ```bash
    python main.py --surface=torus --mesh-algorithm=poisson --resolution=100 --partition-only
+   ```
+
+7. 开启直纹面拟合功能：
+   ```bash
+   python main.py --surface=sphere --developable-fit --developable-error=0.01
+   ```
+
+8. 开启直纹面拟合功能（使用OBJ文件）：
+   ```bash
+   python main.py --mesh-algorithm=obj --path=test_sphere.obj --developable-fit --developable-error=0.005
    ```
 
 ### 测试程序
@@ -200,6 +216,8 @@ python utils/visualize_results.py
 11. **可视化**：在一个窗口中显示颜色块标示的分区和中点，优化边缘显示
 12. **网格可视化**：在执行核心算法前可视化当前操作的网格，确认采样效果
 13. **分区结果保存和加载**：支持将分区结果保存到文件并加载
+14. **直纹面拟合**：根据逼近误差阈值确定直纹面类型，通过样条曲线拟合为直纹面
+15. **直纹面类型检测**：自动检测直纹面的直线端或尖锐端，确定直线或尖端所在位置
 
 ## 系统配置
 
@@ -221,6 +239,7 @@ python utils/visualize_results.py
 - `triangles.npy`：网格三角形
 - `edge_points.npy`：边缘点
 - `tool_path_*.csv`：各分区的刀具路径
+- `developable_surfaces.json`：直纹面拟合结果（当开启直纹面拟合时）
 
 ## 性能优化
 

@@ -242,14 +242,15 @@ def run_edge_midpoint_extraction():
         print("\n可视化分区结果...")
         # 使用新的可视化方法，在一个窗口中同时显示颜色块分区和中点
         if 'edge_midpoints' in system.results:
-            system.visualizer.visualize_partitions_with_midpoints(
-                system.mesh, 
-                partition_labels, 
-                system.results['edge_midpoints']
-            )
+            edge_midpoints = system.results['edge_midpoints']
         else:
-            # 如果没有边缘中点，使用原来的可视化方法
-            system.visualizer.visualize_partitions(system.mesh, partition_labels)
+            edge_midpoints = np.array([])
+        
+        system.visualizer.visualize_partitions_with_midpoints(
+            system.mesh, 
+            partition_labels, 
+            edge_midpoints
+        )
         
         print("\n分区边缘中点提取测试完成!")
         print(f"所有结果已保存到: {output_subdir}")

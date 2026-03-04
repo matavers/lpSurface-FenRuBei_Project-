@@ -18,6 +18,7 @@ from core.nonSphericalTool import NonSphericalTool
 from core.toolOrientationField import ToolOrientationField
 from core.isoScallopField import IsoScallopFieldGenerator
 from core.pathGenerator import PathGenerator
+from core.developableSurfaceFitter import DevelopableSurfaceFitter
 from utils.visualization import Visualizer
 from utils.geometryTools import GeometryTools
 
@@ -35,6 +36,7 @@ class FiveAxisMachiningSystem:
         self.iso_scallop_generator = None
         self.path_generator = None
         self.visualizer = Visualizer()
+        self.developable_fitter = None
         self.mesh = None  # 存储Open3D网格对象
 
         # 结果存储
@@ -43,6 +45,7 @@ class FiveAxisMachiningSystem:
             'tool_orientations': None,
             'scalar_field': None,
             'tool_paths': None,
+            'developable_surfaces': None,
             'metrics': {}
         }
 
@@ -589,6 +592,36 @@ class FiveAxisMachiningSystem:
         with open(metrics_file, 'w') as f:
             json.dump(self.results['metrics'], f, indent=2)
     
+    def fit_developable_surfaces(self, error_threshold: float = 0.01):
+        """拟合直纹面"""
+        if not self.mesh_processor or self.results['partition_labels'] is None:
+            raise ValueError("请先加载网格和运行表面分区")
+
+        print("拟合直纹面...")
+
+        self.developable_fitter = DevelopableSurfaceFitter(self.mesh_processor)
+
+        # 拟合所有分区为直纹面
+        developable_surfaces = {}
+        unique_labels = np.unique(self.results['partition_labels'])
+        
+        for label in unique_labels:
+            partition_vertices = np.where(self.results['partition_labels'] == label)[0]
+            surface = self.developable_fitter.fit_developable_surface(partition_vertices, error_threshold)
+            if surface:
+                developable_surfaces[label] = surface
+
+        self.results['developable_surfaces'] = developable_surfaces
+        self.results['metrics']['num_developable_surfaces'] = len(developable_surfaces)
+
+        print(f"直纹面拟合完成: {len(developable_surfaces)} 个直纹面")
+
+        # 可视化直纹面拼接后的原曲面
+        if developable_surfaces:
+            self.developable_fitter.visualize_developable_assembly(developable_surfaces)
+
+        return developable_surfaces
+
     def _export_additional_data(self, output_dir):
         """导出其他数据"""
         import numpy as np
@@ -623,6 +656,38 @@ class FiveAxisMachiningSystem:
             scalar_file = os.path.join(output_dir, "scalar_field.npy")
             np.save(scalar_file, self.results['scalar_field'])
         
+        # 保存直纹面数据
+        if 'developable_surfaces' in self.results and self.results['developable_surfaces']:
+            developable_file = os.path.join(output_dir, "developable_surfaces.json")
+            # 转换numpy数组为Python列表
+            developable_data = self.results['developable_surfaces']
+            # 深拷贝数据结构
+            import copy
+            developable_serializable = copy.deepcopy(developable_data)
+            
+            # 递归转换所有numpy数组和numpy类型为Python内置类型
+            def convert_ndarray(obj):
+                import numpy as np
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, (np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8)):
+                    return int(obj)
+                elif isinstance(obj, (np.float64, np.float32, np.float16)):
+                    return float(obj)
+                elif isinstance(obj, list):
+                    return [convert_ndarray(item) for item in obj]
+                elif isinstance(obj, dict):
+                    return {convert_ndarray(key): convert_ndarray(value) for key, value in obj.items()}
+                else:
+                    return obj
+            
+            # 转换所有numpy数组
+            developable_serializable = convert_ndarray(developable_serializable)
+            
+            with open(developable_file, 'w') as f:
+                json.dump(developable_serializable, f, indent=2)
+            print(f"直纹面数据已保存: {len(developable_serializable)} 个直纹面")
+        
         # 保存刀具路径为JSON格式（便于后续可视化）
         if 'tool_paths' in self.results and self.results['tool_paths']:
             tool_paths_file = os.path.join(output_dir, "tool_paths.json")
@@ -632,15 +697,19 @@ class FiveAxisMachiningSystem:
             import copy
             tool_paths_serializable = copy.deepcopy(tool_paths_data)
             
-            # 递归转换所有numpy数组为Python列表
+            # 递归转换所有numpy数组和numpy类型为Python内置类型
             def convert_ndarray(obj):
                 import numpy as np
                 if isinstance(obj, np.ndarray):
                     return obj.tolist()
+                elif isinstance(obj, (np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8)):
+                    return int(obj)
+                elif isinstance(obj, (np.float64, np.float32, np.float16)):
+                    return float(obj)
                 elif isinstance(obj, list):
                     return [convert_ndarray(item) for item in obj]
                 elif isinstance(obj, dict):
-                    return {key: convert_ndarray(value) for key, value in obj.items()}
+                    return {convert_ndarray(key): convert_ndarray(value) for key, value in obj.items()}
                 else:
                     return obj
             
@@ -694,7 +763,7 @@ class FiveAxisMachiningSystem:
                     json.dump({'edges': unique_edges}, f, indent=2)
                 print(f"分区边缘数据已保存: {len(unique_edges)} 条边缘")
 
-    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None):
+    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01):
         """运行完整处理流程"""
         print("=" * 50)
         print("五轴加工路径规划系统")
@@ -727,47 +796,52 @@ class FiveAxisMachiningSystem:
                     self.save_intermediate_result("edge_midpoints", self.results['edge_midpoints'])
                     self.save_metrics()
 
-            # 4. 生成工具方向场
-            print("\n4. 生成工具方向场...")
-            tool_orientations = self.load_intermediate_result("tool_orientations")
-            if tool_orientations is not None:
-                self.results['tool_orientations'] = tool_orientations
-                print("跳过方向场生成步骤，使用已加载的方向场结果")
+            # 4. 直纹面拟合（如果开启）
+            if developable_fit:
+                print("\n4. 拟合直纹面...")
+                self.fit_developable_surfaces(developable_error_threshold)
             else:
-                self.generate_tool_orientation_field()
-                if self.results['tool_orientations'] is not None:
-                    self.save_intermediate_result("tool_orientations", self.results['tool_orientations'])
-                    self.save_metrics()
+                # 5. 生成工具方向场
+                print("\n4. 生成工具方向场...")
+                tool_orientations = self.load_intermediate_result("tool_orientations")
+                if tool_orientations is not None:
+                    self.results['tool_orientations'] = tool_orientations
+                    print("跳过方向场生成步骤，使用已加载的方向场结果")
+                else:
+                    self.generate_tool_orientation_field()
+                    if self.results['tool_orientations'] is not None:
+                        self.save_intermediate_result("tool_orientations", self.results['tool_orientations'])
+                        self.save_metrics()
 
-            # 5. 生成等残留高度场
-            print("\n5. 生成等残留高度场...")
-            scalar_field = self.load_intermediate_result("scalar_field")
-            if scalar_field is not None:
-                self.results['scalar_field'] = scalar_field
-                print("跳过标量场生成步骤，使用已加载的标量场结果")
-            else:
-                self.generate_iso_scallop_field()
-                if self.results['scalar_field'] is not None:
-                    self.save_intermediate_result("scalar_field", self.results['scalar_field'])
-                    self.save_metrics()
+                # 6. 生成等残留高度场
+                print("\n5. 生成等残留高度场...")
+                scalar_field = self.load_intermediate_result("scalar_field")
+                if scalar_field is not None:
+                    self.results['scalar_field'] = scalar_field
+                    print("跳过标量场生成步骤，使用已加载的标量场结果")
+                else:
+                    self.generate_iso_scallop_field()
+                    if self.results['scalar_field'] is not None:
+                        self.save_intermediate_result("scalar_field", self.results['scalar_field'])
+                        self.save_metrics()
 
-            # 6. 生成刀具路径
-            print("\n6. 生成刀具路径...")
-            # 刀具路径比较复杂，暂时不支持加载，每次都重新生成
-            self.generate_tool_paths()
+                # 7. 生成刀具路径
+                print("\n6. 生成刀具路径...")
+                # 刀具路径比较复杂，暂时不支持加载，每次都重新生成
+                self.generate_tool_paths()
 
-            # 7. 可视化
+            # 8. 可视化
             if not skip_visualization:
                 print("\n7. 可视化结果...")
                 self.visualize_results()
             else:
                 print("跳过可视化步骤...")
 
-            # 8. 导出结果
+            # 9. 导出结果
             print("\n8. 导出结果...")
             output_dir = self.export_results()
             
-            # 9. 保存其他数据
+            # 10. 保存其他数据
             print("\n9. 保存附加数据...")
             self._export_additional_data(output_dir)
 
@@ -780,7 +854,10 @@ class FiveAxisMachiningSystem:
             total_time = sum(self.results['metrics'].get(key, 0) for key in time_metrics)
             print(f"总处理时间: {total_time:.2f} 秒")
             print(f"分区数量: {self.results['metrics'].get('num_partitions', 'N/A')}")
-            print(f"路径总长度: {self.results['metrics'].get('total_path_length', 'N/A'):.2f} mm")
+            if 'num_developable_surfaces' in self.results['metrics']:
+                print(f"直纹面数量: {self.results['metrics']['num_developable_surfaces']}")
+            if 'total_path_length' in self.results['metrics']:
+                print(f"路径总长度: {self.results['metrics']['total_path_length']:.2f} mm")
             print(f"详细结果保存于: {output_dir}")
             print(f"中间结果存储于: {self.intermediate_dir}")
 
@@ -994,6 +1071,8 @@ if __name__ == "__main__":
     surface_func = None
     surface_params = {}
     input_path = None
+    developable_fit = False
+    developable_error_threshold = 0.01
     
     for arg in sys.argv[1:]:
         if arg == "--partition-only":
@@ -1006,6 +1085,10 @@ if __name__ == "__main__":
             surface_params['resolution'] = int(arg.split("=")[1])
         elif arg.startswith("--path="):
             input_path = arg.split("=")[1]
+        elif arg == "--developable-fit":
+            developable_fit = True
+        elif arg.startswith("--developable-error="):
+            developable_error_threshold = float(arg.split("=")[1])
     
     # 验证参数组合
     # 1. --path只能与--mesh-algorithm=obj共存
@@ -1060,16 +1143,19 @@ if __name__ == "__main__":
     if not input_path and not surface_func:
         print("错误: 必须指定--path参数或--surface参数")
         # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--developable-fit] [--developable-error=<float>]")
         print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
         print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
         print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
         print("  --resolution: 曲面采样分辨率，默认值: 50")
         print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+        print("  --developable-fit: 开启直纹面逼近功能，不计算刀具路径")
+        print("  --developable-error: 直纹面逼近误差阈值，默认值: 0.01")
         # 示例用法
         print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj")
         print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only")
         print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --resolution=50")
+        print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --developable-error=0.005")
         print("说明:")
         print("  1. 当 --mesh-algorithm=obj 时，必须指定--path参数，直接使用OBJ文件，跳过采样步骤")
         print("  2. 当指定 --surface 参数时，会根据曲面函数生成网格，不能与--path参数同时使用")
@@ -1077,6 +1163,8 @@ if __name__ == "__main__":
         print("  4. 有默认值的参数若没有指定，采用默认值")
         print("  5. 若--mesh-algorithm为obj才采用.obj文件，跳过采样步骤")
         print("  6. 若为其他算法名称则采样构造网格，随后再进行其他步骤")
+        print("  7. 若指定--developable-fit，则开启直纹面逼近功能，不计算刀具路径")
+        print("  8. 若计算刀具路径，则不逼近直纹面")
         sys.exit(1)
     
     system = FiveAxisMachiningSystem()
@@ -1085,7 +1173,7 @@ if __name__ == "__main__":
     if partition_only:
         success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
     else:
-        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
+        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, developable_fit=developable_fit, developable_error_threshold=developable_error_threshold)
     
     if success:
         print("处理完成!")
