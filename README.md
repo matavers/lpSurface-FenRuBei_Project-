@@ -88,6 +88,49 @@
    python main.py path/to/mesh.obj --partition-only
    ```
 
+### 命令行参数
+
+系统支持以下命令行参数：
+
+| 参数 | 描述 | 可选值 | 默认值 |
+|------|------|--------|--------|
+| `--partition-only` | 只运行分区并保存数据，不执行刀具路径规划 | - | 无 |
+| `--mesh-algorithm` | 网格生成算法 | delaunay_cocone, bpa, poisson, tsdf, obj | delaunay_cocone |
+| `--surface` | 曲面函数名称 | sphere, torus, saddle | 无 |
+| `--resolution` | 曲面采样分辨率 | 整数 | 50 |
+
+### 使用示例
+
+1. 使用默认算法处理OBJ文件：
+   ```bash
+   python main.py test_sphere.obj
+   ```
+
+2. 使用指定算法：
+   ```bash
+   python main.py test_sphere.obj --mesh-algorithm=bpa
+   ```
+
+3. 使用曲面函数生成网格：
+   ```bash
+   python main.py sphere --surface=sphere --resolution=50
+   ```
+
+4. 直接使用OBJ文件（不进行重建）：
+   ```bash
+   python main.py test_sphere.obj --mesh-algorithm=obj
+   ```
+
+5. 只运行分区：
+   ```bash
+   python main.py test_sphere.obj --partition-only
+   ```
+
+6. 综合使用多个参数：
+   ```bash
+   python main.py torus --surface=torus --mesh-algorithm=poisson --resolution=100 --partition-only
+   ```
+
 ### 测试程序
 
 **tips**:如果使用python虚拟环境，先激活虚拟环境

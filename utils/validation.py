@@ -48,6 +48,9 @@ class MachiningValidator:
         
         collision_detected = False
         
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == len(self.mesh.vertices) and np.any(self.mesh.vertex_normals)
+        
         for path in tool_paths['paths']:
             if path['type'] == 'connection':
                 continue  # 跳过连接路径
@@ -59,7 +62,12 @@ class MachiningValidator:
                 # 找到最近的顶点
                 distances = np.linalg.norm(self.mesh.vertices - point, axis=1)
                 nearest_vertex = np.argmin(distances)
-                normal = self.mesh.vertex_normals[nearest_vertex]
+                
+                if has_normals:
+                    normal = self.mesh.vertex_normals[nearest_vertex]
+                else:
+                    # 如果没有法线，使用默认值
+                    normal = np.array([0, 0, 1])
                 
                 # 检查碰撞
                 is_collision = self.tool.check_collision_simple(

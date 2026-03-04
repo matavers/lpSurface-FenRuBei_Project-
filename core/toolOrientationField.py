@@ -73,8 +73,16 @@ class ToolOrientationField:
         """
         # 获取顶点信息
         vertex_pos = self.mesh.vertices[vertex_idx]
-        vertex_normal = self.mesh.vertex_normals[vertex_idx]
         curvature = self.mesh.curvatures[vertex_idx]
+        
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == self.num_vertices and np.any(self.mesh.vertex_normals)
+        
+        if has_normals:
+            vertex_normal = self.mesh.vertex_normals[vertex_idx]
+        else:
+            # 如果没有法线，使用默认值
+            vertex_normal = np.array([0, 0, 1])
         
         # 1. 基于曲率的基础TAR面积
         # 曲率越小，TAR面积越大
@@ -132,8 +140,15 @@ class ToolOrientationField:
         queue = deque([seed_vertex])
         visited = set([seed_vertex])
 
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == self.num_vertices and np.any(self.mesh.vertex_normals)
+        
         # 种子点的方向（简化：使用顶点法向量）
-        seed_orientation = self.mesh.vertex_normals[seed_vertex]
+        if has_normals:
+            seed_orientation = self.mesh.vertex_normals[seed_vertex]
+        else:
+            # 如果没有法线，使用默认值
+            seed_orientation = np.array([0, 0, 1])
         self.vertex_orientations[seed_vertex] = seed_orientation
 
         while queue:
@@ -163,8 +178,15 @@ class ToolOrientationField:
         Returns:
             最佳方向
         """
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == self.num_vertices and np.any(self.mesh.vertex_normals)
+        
         # 获取顶点法向量
-        normal = self.mesh.vertex_normals[vertex_idx]
+        if has_normals:
+            normal = self.mesh.vertex_normals[vertex_idx]
+        else:
+            # 如果没有法线，使用默认值
+            normal = np.array([0, 0, 1])
         curvature = self.mesh.curvatures[vertex_idx]
 
         # 1. 生成候选方向
@@ -282,9 +304,17 @@ class ToolOrientationField:
         """
         reoriented = orientations.copy()
 
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == self.num_vertices and np.any(self.mesh.vertex_normals)
+
         for i in range(self.num_vertices):
             current_orientation = orientations[i]
-            normal = self.mesh.vertex_normals[i]
+            
+            if has_normals:
+                normal = self.mesh.vertex_normals[i]
+            else:
+                # 如果没有法线，使用默认值
+                normal = np.array([0, 0, 1])
             
             # 1. 检查方向是否在TAR内
             # 计算方向与法向量的夹角

@@ -123,19 +123,15 @@ class MeshProcessor:
         """
         curvatures = np.zeros(len(self.vertices))
 
+        # 检查法线是否存在且足够
+        has_normals = len(self.vertex_normals) == len(self.vertices) and np.any(self.vertex_normals)
+
         for i in range(len(self.vertices)):
             # 获取邻居顶点
             neighbors = self.adjacency[i]
             if len(neighbors) < 3:  # 需要至少3个邻居来计算曲率
                 continue
 
-            # 方法1: 使用法向量变化计算平均曲率
-            normal_i = self.vertex_normals[i]
-            neighbor_normals = self.vertex_normals[neighbors]
-            dots = np.clip(np.dot(neighbor_normals, normal_i), -1.0, 1.0)
-            angles = np.arccos(dots)
-            normal_variation = np.sum(angles) / len(neighbors)
-            
             # 方法2: 使用顶点位置计算离散曲率
             # 计算顶点i到所有邻居的平均距离
             vertex_pos = self.vertices[i]
@@ -151,9 +147,20 @@ class MeshProcessor:
             height = np.linalg.norm(centroid - vertex_pos)
             discrete_curvature = 2 * height / (avg_distance ** 2 + 1e-8)
             
-            # 综合两种方法的结果
-            # 使用权重平均
-            curvatures[i] = 0.6 * normal_variation + 0.4 * discrete_curvature
+            if has_normals:
+                # 方法1: 使用法向量变化计算平均曲率
+                normal_i = self.vertex_normals[i]
+                neighbor_normals = self.vertex_normals[neighbors]
+                dots = np.clip(np.dot(neighbor_normals, normal_i), -1.0, 1.0)
+                angles = np.arccos(dots)
+                normal_variation = np.sum(angles) / len(neighbors)
+                
+                # 综合两种方法的结果
+                # 使用权重平均
+                curvatures[i] = 0.6 * normal_variation + 0.4 * discrete_curvature
+            else:
+                # 只使用离散曲率
+                curvatures[i] = discrete_curvature
 
         # 归一化
         max_curvature = np.max(curvatures)
@@ -314,30 +321,34 @@ class MeshProcessor:
         if not isinstance(tool, NonSphericalTool):
             raise ValueError("工具必须是NonSphericalTool类型")
         
+        # 检查法线是否存在且足够
+        has_normals = len(self.vertex_normals) == len(self.vertices) and np.any(self.vertex_normals)
+        
         for i in range(len(self.vertices)):
             vertex_pos = self.vertices[i]
-            vertex_normal = self.vertex_normals[i]
             
             # 计算最大切削宽度
             max_width = 0
             best_direction = None
             
-            # 采样不同的刀具方向
-            # 简化实现：只考虑法向量方向
-            direction = vertex_normal
-            
-            # 计算该方向的切削宽度
-            try:
-                width = tool.calculate_cutting_width(
-                    vertex_pos,
-                    vertex_normal,
-                    direction,
-                    scallop_height=0.4  # 默认残留高度
-                )
-                max_width = width
-                best_direction = direction
-            except:
-                pass
+            if has_normals:
+                vertex_normal = self.vertex_normals[i]
+                # 采样不同的刀具方向
+                # 简化实现：只考虑法向量方向
+                direction = vertex_normal
+                
+                # 计算该方向的切削宽度
+                try:
+                    width = tool.calculate_cutting_width(
+                        vertex_pos,
+                        vertex_normal,
+                        direction,
+                        scallop_height=0.4  # 默认残留高度
+                    )
+                    max_width = width
+                    best_direction = direction
+                except:
+                    pass
             
             self.max_cutting_widths[i] = max_width
     
@@ -346,6 +357,9 @@ class MeshProcessor:
         
         直纹面逼近误差反映了曲面局部偏离可展曲面的程度
         """
+        # 检查法线是否存在且足够
+        has_normals = len(self.vertex_normals) == len(self.vertices) and np.any(self.vertex_normals)
+        
         for i in range(len(self.vertices)):
             # 获取顶点的一环邻域
             neighbors = self.adjacency[i]
@@ -359,8 +373,12 @@ class MeshProcessor:
             
             # 拟合直纹面
             # 简化实现：计算邻域的平均法向量
-            avg_normal = np.mean(self.vertex_normals[neighbors], axis=0)
-            avg_normal /= np.linalg.norm(avg_normal)
+            if has_normals:
+                avg_normal = np.mean(self.vertex_normals[neighbors], axis=0)
+                avg_normal /= np.linalg.norm(avg_normal)
+            else:
+                # 如果没有法线，使用默认值
+                avg_normal = np.array([0, 0, 1])
             
             # 计算直纹面的曲率
             # 简化实现：使用平均法向量计算曲率

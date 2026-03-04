@@ -119,6 +119,9 @@ class IsoScallopFieldGenerator:
         n = len(self.mesh.vertices)
         gradient_directions = np.zeros((n, 3))
 
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == n and np.any(self.mesh.vertex_normals)
+
         if CGAL_AVAILABLE:
             # 使用CGAL的并行处理能力
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -127,7 +130,11 @@ class IsoScallopFieldGenerator:
             tasks = []
             for i in range(n):
                 tool_dir = self.tool_orientations[i]
-                normal = self.mesh.vertex_normals[i]
+                if has_normals:
+                    normal = self.mesh.vertex_normals[i]
+                else:
+                    # 如果没有法线，使用默认值
+                    normal = np.array([0, 0, 1])
                 tasks.append((i, tool_dir, normal))
             
             # 并行计算梯度方向
@@ -146,7 +153,11 @@ class IsoScallopFieldGenerator:
         else:
             # 优化实现：使用NumPy向量化操作
             tool_dirs = self.tool_orientations
-            normals = self.mesh.vertex_normals
+            if has_normals:
+                normals = self.mesh.vertex_normals
+            else:
+                # 如果没有法线，使用默认值
+                normals = np.tile(np.array([0, 0, 1]), (n, 1))
             
             # 计算梯度方向
             gradients = np.cross(tool_dirs, normals)
@@ -194,7 +205,16 @@ class IsoScallopFieldGenerator:
             return 0.001
 
         vertex_pos = self.mesh.vertices[vertex_idx]
-        vertex_normal = self.mesh.vertex_normals[vertex_idx]
+        
+        # 检查法线是否存在且足够
+        has_normals = hasattr(self.mesh, 'vertex_normals') and len(self.mesh.vertex_normals) == len(self.mesh.vertices) and np.any(self.mesh.vertex_normals)
+        
+        if has_normals:
+            vertex_normal = self.mesh.vertex_normals[vertex_idx]
+        else:
+            # 如果没有法线，使用默认值
+            vertex_normal = np.array([0, 0, 1])
+        
         tool_orientation = self.tool_orientations[vertex_idx]
         curvature = self.mesh.curvatures[vertex_idx]
 

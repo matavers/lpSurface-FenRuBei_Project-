@@ -214,9 +214,10 @@ class Visualizer:
         # 创建边缘中点云
         print(f"创建边缘中点云: {len(edge_midpoints)} 个点")
         midpoint_pcd = o3d.geometry.PointCloud()
-        midpoint_pcd.points = o3d.utility.Vector3dVector(edge_midpoints)
-        # 设置中点颜色为红色
-        midpoint_pcd.paint_uniform_color([1, 0, 0])
+        if len(edge_midpoints) > 0:
+            midpoint_pcd.points = o3d.utility.Vector3dVector(edge_midpoints)
+            # 设置中点颜色为红色
+            midpoint_pcd.paint_uniform_color([1, 0, 0])
 
         # 可视化
         print(f"分区和中点可视化完成: {num_partitions} 个分区, {len(edge_midpoints)} 个中点")
@@ -226,9 +227,11 @@ class Visualizer:
         vis = o3d.visualization.Visualizer()
         vis.create_window(window_name=f"分区和中点可视化: {num_partitions} 个分区 (质量: {quality_metrics['overall_quality']:.2f})", width=1024, height=768)
         
-        # 添加网格和中点
+        # 添加网格
         vis.add_geometry(new_mesh)
-        vis.add_geometry(midpoint_pcd)
+        # 只有当有中点时才添加
+        if len(edge_midpoints) > 0:
+            vis.add_geometry(midpoint_pcd)
         
         # 设置渲染选项
         render_option = vis.get_render_option()

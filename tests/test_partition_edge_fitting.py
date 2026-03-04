@@ -33,9 +33,10 @@ def run_partition_edge_fitting():
         print("\n初始化五轴加工系统...")
         system = FiveAxisMachiningSystem()
         
-        # 加载网格
+        # 加载网格，使用新的算法选择机制
         print("\n加载网格...")
-        system.load_mesh_from_file(mesh_path)
+        mesh_algorithm = "obj"  # 直接使用OBJ文件
+        system.load_mesh_from_file(mesh_path, mesh_algorithm=mesh_algorithm)
         
         # 设置刀具
         print("\n设置刀具...")
@@ -247,8 +248,13 @@ def run_partition_edge_fitting():
                 system.results['edge_midpoints']
             )
         else:
-            # 如果没有边缘中点，使用原来的可视化方法
-            system.visualizer.visualize_partitions(system.mesh, partition_labels)
+            # 如果没有边缘中点，使用边缘中点可视化方法
+            # 由于没有边缘中点，我们创建一个空数组
+            system.visualizer.visualize_partitions_with_midpoints(
+                system.mesh, 
+                partition_labels, 
+                np.array([])
+            )
         
         # 跳过点云可视化
         # print("\n使用备用方案：点云可视化...")

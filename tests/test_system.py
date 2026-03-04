@@ -22,22 +22,6 @@ def run_main_pipeline():
     print("=" * 70)
     
     try:
-        # 创建测试网格（使用Open3D创建一个球体）
-        print("\n创建测试网格...")
-        mesh = o3d.geometry.TriangleMesh.create_sphere(
-            radius=10.0,
-            resolution=50
-        )
-        
-        # 计算法线
-        mesh.compute_vertex_normals()
-        mesh.compute_triangle_normals()
-        
-        # 保存为临时文件
-        mesh_path = "temp_sphere.obj"
-        o3d.io.write_triangle_mesh(mesh_path, mesh)
-        print(f"测试网格创建完成，保存到: {mesh_path}")
-        
         # 初始化系统 - 增加分区大小
         print("\n初始化五轴加工系统...")
         
@@ -58,8 +42,16 @@ def run_main_pipeline():
         # 运行完整流程
         print("\n运行完整加工路径规划流程...")
         
-        # 先加载网格
-        system.load_mesh_from_file(mesh_path)
+        # 使用曲面函数生成网格，测试新的算法选择机制
+        surface_func = "sphere"
+        surface_params = {"resolution": 50}
+        mesh_algorithm = "delaunay_cocone"  # 使用默认的Delaunay + Cocone算法
+        
+        print(f"使用曲面函数: {surface_func}")
+        print(f"使用网格算法: {mesh_algorithm}")
+        
+        # 先加载网格（使用曲面函数生成）
+        system.load_mesh_from_file("sphere", mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
         system.setup_tool()
         
         # 运行分区
@@ -178,9 +170,9 @@ def run_main_pipeline():
             # 如果没有边缘中点，使用原来的可视化方法
             system.visualizer.visualize_partitions(system.mesh, partition_labels)
         
-        # 使用原始网格运行完整流程
-        print("\n使用原始网格运行完整流程...")
-        success = system.run_full_pipeline(mesh_path, skip_visualization=True)  # 禁用可视化，避免重复显示
+        # 使用曲面函数运行完整流程
+        print("\n使用曲面函数运行完整流程...")
+        success = system.run_full_pipeline("sphere", skip_visualization=True, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)  # 禁用可视化，避免重复显示
         
         if success:
             # 运行验证
@@ -206,9 +198,11 @@ def run_main_pipeline():
         traceback.print_exc()
     finally:
         # 清理临时文件
-        if 'mesh_path' in locals() and os.path.exists(mesh_path):
-            os.remove(mesh_path)
-            print(f"清理临时文件: {mesh_path}")
+        temp_files = ["temp_sphere.obj", "temp_torus.obj", "temp_saddle.obj"]
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                print(f"清理临时文件: {temp_file}")
 
 
 if __name__ == "__main__":
