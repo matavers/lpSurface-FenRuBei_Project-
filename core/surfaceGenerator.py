@@ -391,7 +391,7 @@ class SurfaceGenerator:
         else:
             return np.array([0, 0, 1])
     
-    def generate_sphere(self, radius=1.0, resolution=50, output_path="sphere.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0, uniform_density=True):
+    def generate_sphere(self, radius=1.0, resolution=50, output_path="sphere.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0, uniform_density=True, uniform_sampling=False):
         """
         生成球体的OBJ文件
         
@@ -403,34 +403,187 @@ class SurfaceGenerator:
             visualize_as_point_cloud: 是否以点云形式可视化
             point_cloud_downsample: 点云下采样因子，0.0表示不采样
             uniform_density: 是否使用均匀密度分布
+            uniform_sampling: 是否使用均匀采样生成网格
             
         Returns:
             str: 生成的OBJ文件路径
         """
-        def sphere_func(u, v):
-            # 参数化球体
-            theta = 2 * np.pi * u
-            if uniform_density:
-                # 使用改进的参数化方法，减少两极密度
-                # 将v从[0,1]映射到[0,π]，使用sin(phi/2)来均匀分布点
-                phi = 2 * np.arcsin(np.sqrt(v))
-            else:
-                phi = np.pi * v
-            x = radius * np.sin(phi) * np.cos(theta)
-            y = radius * np.sin(phi) * np.sin(theta)
-            z = radius * np.cos(phi)
-            return x, y, z
+        print(f"generate_sphere called with uniform_sampling={uniform_sampling}")
+        if uniform_sampling:
+            print(f"Calling generate_uniform_sphere with output_path={output_path}")
+            return self.generate_uniform_sphere(radius, resolution, output_path, density_factor, visualize_as_point_cloud, point_cloud_downsample)
+        else:
+            def sphere_func(u, v):
+                # 参数化球体
+                theta = 2 * np.pi * u
+                if uniform_density:
+                    # 使用改进的参数化方法，减少两极密度
+                    # 将v从[0,1]映射到[0,π]，使用sin(phi/2)来均匀分布点
+                    phi = 2 * np.arcsin(np.sqrt(v))
+                else:
+                    phi = np.pi * v
+                x = radius * np.sin(phi) * np.cos(theta)
+                y = radius * np.sin(phi) * np.sin(theta)
+                z = radius * np.cos(phi)
+                return x, y, z
+            
+            return self.generate_surface(
+                sphere_func,
+                resolution=(resolution, resolution),
+                bounds=((0, 1), (0, 1)),
+                output_path=output_path,
+                parametric=True,
+                density_factor=density_factor,
+                visualize_as_point_cloud=visualize_as_point_cloud,
+                point_cloud_downsample=point_cloud_downsample
+            )
+    
+    def generate_uniform_sphere(self, radius=1.0, resolution=50, output_path="uniform_sphere.obj", density_factor=1.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0):
+        """
+        生成均匀采样的球体网格，确保各向对称，每个网格单元为正方形
         
-        return self.generate_surface(
-            sphere_func,
-            resolution=(resolution, resolution),
-            bounds=((0, 1), (0, 1)),
-            output_path=output_path,
-            parametric=True,
-            density_factor=density_factor,
-            visualize_as_point_cloud=visualize_as_point_cloud,
-            point_cloud_downsample=point_cloud_downsample
-        )
+        Args:
+            radius: 球体半径
+            resolution: 分辨率
+            output_path: 输出OBJ文件路径
+            density_factor: 密度调节系数
+            visualize_as_point_cloud: 是否以点云形式可视化
+            point_cloud_downsample: 点云下采样因子，0.0表示不采样
+            
+        Returns:
+            str: 生成的OBJ文件路径
+        """
+        print(f"生成均匀采样的球体网格，分辨率: {resolution}")
+        
+        # 生成顶点
+        vertices = []
+        faces = []
+        
+        # 计算纬度和经度的步长
+        # 为了保证各向对称，使用相同的分辨率
+        num_lat = resolution
+        num_lon = resolution
+        
+        # 生成顶点
+        for i in range(num_lat + 1):
+            # 计算纬度角度，使用sin(phi/2)来均匀分布点
+            phi = 2 * np.arcsin(np.sqrt(i / num_lat))
+            for j in range(num_lon + 1):
+                # 计算经度角度
+                theta = 2 * np.pi * j / num_lon
+                
+                # 计算顶点坐标
+                x = radius * np.sin(phi) * np.cos(theta)
+                y = radius * np.sin(phi) * np.sin(theta)
+                z = radius * np.cos(phi)
+                
+                vertices.append((x, y, z))
+        
+        # 生成面
+        for i in range(num_lat):
+            for j in range(num_lon):
+                # 计算四个顶点的索引
+                v0 = i * (num_lon + 1) + j
+                v1 = (i + 1) * (num_lon + 1) + j
+                v2 = (i + 1) * (num_lon + 1) + (j + 1)
+                v3 = i * (num_lon + 1) + (j + 1)
+                
+                # 添加两个三角形
+                faces.append((v0 + 1, v1 + 1, v2 + 1))  # OBJ文件从1开始计数
+                faces.append((v0 + 1, v2 + 1, v3 + 1))
+        
+        # 写入OBJ文件
+        with open(output_path, 'w') as f:
+            # 写入顶点
+            for v in vertices:
+                f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            
+            # 写入面
+            for face in faces:
+                f.write(f"f {face[0]} {face[1]} {face[2]}\n")
+        
+        print(f"均匀采样球体生成完成，保存到: {output_path}")
+        print(f"顶点数: {len(vertices)}, 面数: {len(faces)}")
+        
+        # 可视化生成的网格
+        self.visualize_mesh(vertices, faces, title=f"均匀采样的球体: {os.path.basename(output_path)}", as_point_cloud=visualize_as_point_cloud, point_cloud_downsample=point_cloud_downsample)
+        
+        return output_path
+    
+    def generate_uniform_ellipsoid(self, semi_axes=(1.0, 1.0, 1.0), resolution=50, output_path="uniform_ellipsoid.obj", density_factor=1.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0):
+        """
+        生成均匀采样的椭球体网格，确保各向对称，每个网格单元为长方形
+        
+        Args:
+            semi_axes: 椭球的三个半轴长度
+            resolution: 分辨率
+            output_path: 输出OBJ文件路径
+            density_factor: 密度调节系数
+            visualize_as_point_cloud: 是否以点云形式可视化
+            point_cloud_downsample: 点云下采样因子，0.0表示不采样
+            
+        Returns:
+            str: 生成的OBJ文件路径
+        """
+        print(f"生成均匀采样的椭球体网格，分辨率: {resolution}")
+        
+        # 生成顶点
+        vertices = []
+        faces = []
+        
+        # 计算纬度和经度的步长
+        # 为了保证各向对称，使用相同的分辨率
+        num_lat = resolution
+        num_lon = resolution
+        
+        # 提取半轴长度
+        a, b, c = semi_axes
+        
+        # 生成顶点
+        for i in range(num_lat + 1):
+            # 计算纬度角度，使用sin(phi/2)来均匀分布点
+            phi = 2 * np.arcsin(np.sqrt(i / num_lat))
+            for j in range(num_lon + 1):
+                # 计算经度角度
+                theta = 2 * np.pi * j / num_lon
+                
+                # 计算顶点坐标
+                x = a * np.sin(phi) * np.cos(theta)
+                y = b * np.sin(phi) * np.sin(theta)
+                z = c * np.cos(phi)
+                
+                vertices.append((x, y, z))
+        
+        # 生成面
+        for i in range(num_lat):
+            for j in range(num_lon):
+                # 计算四个顶点的索引
+                v0 = i * (num_lon + 1) + j
+                v1 = (i + 1) * (num_lon + 1) + j
+                v2 = (i + 1) * (num_lon + 1) + (j + 1)
+                v3 = i * (num_lon + 1) + (j + 1)
+                
+                # 添加两个三角形
+                faces.append((v0 + 1, v1 + 1, v2 + 1))  # OBJ文件从1开始计数
+                faces.append((v0 + 1, v2 + 1, v3 + 1))
+        
+        # 写入OBJ文件
+        with open(output_path, 'w') as f:
+            # 写入顶点
+            for v in vertices:
+                f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            
+            # 写入面
+            for face in faces:
+                f.write(f"f {face[0]} {face[1]} {face[2]}\n")
+        
+        print(f"均匀采样椭球体生成完成，保存到: {output_path}")
+        print(f"顶点数: {len(vertices)}, 面数: {len(faces)}")
+        
+        # 可视化生成的网格
+        self.visualize_mesh(vertices, faces, title=f"均匀采样的椭球体: {os.path.basename(output_path)}", as_point_cloud=visualize_as_point_cloud, point_cloud_downsample=point_cloud_downsample)
+        
+        return output_path
     
     def generate_torus(self, radius=1.0, tube_radius=0.3, resolution=50, output_path="torus.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0):
         """

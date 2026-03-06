@@ -159,7 +159,7 @@ class FiveAxisMachiningSystem:
         else:
             return False
 
-    def load_mesh_from_file(self, input_path, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None):
+    def load_mesh_from_file(self, input_path, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, uniform_sampling=False):
         """从文件加载网格或生成曲面网格"""
         # 当mesh_algorithm为obj时，直接使用OBJ文件，跳过曲面函数生成和采样步骤
         if mesh_algorithm == "obj":
@@ -215,9 +215,13 @@ class FiveAxisMachiningSystem:
                         radius=10.0,
                         resolution=resolution,
                         output_path="temp_sphere.obj",
-                        density_factor=1.0
+                        density_factor=1.0,
+                        uniform_sampling=uniform_sampling
                     )
                     input_path = sphere_path
+                    # 如果使用均匀采样，直接使用生成的OBJ文件，跳过网格重建
+                    if uniform_sampling:
+                        mesh_algorithm = "obj"
                 elif surface_func == "torus":
                     # 生成圆环
                     torus_path = generator.generate_torus(
@@ -601,24 +605,16 @@ class FiveAxisMachiningSystem:
 
         self.developable_fitter = DevelopableSurfaceFitter(self.mesh_processor)
 
+        # 获取边缘中点
+        edge_midpoints = self.results.get('edge_midpoints', np.array([]))
+
         # 拟合所有分区为直纹面
-        developable_surfaces = {}
-        unique_labels = np.unique(self.results['partition_labels'])
-        
-        for label in unique_labels:
-            partition_vertices = np.where(self.results['partition_labels'] == label)[0]
-            surface = self.developable_fitter.fit_developable_surface(partition_vertices, error_threshold)
-            if surface:
-                developable_surfaces[label] = surface
+        developable_surfaces = self.developable_fitter.fit_developable_surfaces(self.results['partition_labels'], edge_midpoints)
 
         self.results['developable_surfaces'] = developable_surfaces
         self.results['metrics']['num_developable_surfaces'] = len(developable_surfaces)
 
         print(f"直纹面拟合完成: {len(developable_surfaces)} 个直纹面")
-
-        # 可视化直纹面拼接后的原曲面
-        if developable_surfaces:
-            self.developable_fitter.visualize_developable_assembly(developable_surfaces)
 
         return developable_surfaces
 
@@ -763,7 +759,7 @@ class FiveAxisMachiningSystem:
                     json.dump({'edges': unique_edges}, f, indent=2)
                 print(f"分区边缘数据已保存: {len(unique_edges)} 条边缘")
 
-    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01):
+    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01, uniform_sampling=False):
         """运行完整处理流程"""
         print("=" * 50)
         print("五轴加工路径规划系统")
@@ -775,7 +771,8 @@ class FiveAxisMachiningSystem:
             
             # 1. 加载网格
             print("\n1. 加载网格...")
-            self.load_mesh_from_file(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
+            # 传递uniform_sampling参数给load_mesh_from_file
+            self.load_mesh_from_file(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, uniform_sampling=uniform_sampling)
 
             # 2. 设置刀具
             print("\n2. 设置刀具...")
@@ -1073,6 +1070,7 @@ if __name__ == "__main__":
     input_path = None
     developable_fit = False
     developable_error_threshold = 0.01
+    uniform_sampling = False
     
     for arg in sys.argv[1:]:
         if arg == "--partition-only":
@@ -1089,6 +1087,8 @@ if __name__ == "__main__":
             developable_fit = True
         elif arg.startswith("--developable-error="):
             developable_error_threshold = float(arg.split("=")[1])
+        elif arg == "--uniform-sampling":
+            uniform_sampling = True
     
     # 验证参数组合
     # 1. --path只能与--mesh-algorithm=obj共存
@@ -1143,11 +1143,12 @@ if __name__ == "__main__":
     if not input_path and not surface_func:
         print("错误: 必须指定--path参数或--surface参数")
         # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--developable-fit] [--developable-error=<float>]")
+        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--developable-fit] [--developable-error=<float>] [--uniform-sampling]")
         print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
         print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
         print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
         print("  --resolution: 曲面采样分辨率，默认值: 50")
+        print("  --uniform-sampling: 使用均匀采样生成网格，确保各向对称")
         print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
         print("  --developable-fit: 开启直纹面逼近功能，不计算刀具路径")
         print("  --developable-error: 直纹面逼近误差阈值，默认值: 0.01")
@@ -1173,7 +1174,7 @@ if __name__ == "__main__":
     if partition_only:
         success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
     else:
-        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, developable_fit=developable_fit, developable_error_threshold=developable_error_threshold)
+        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, developable_fit=developable_fit, developable_error_threshold=developable_error_threshold, uniform_sampling=uniform_sampling)
     
     if success:
         print("处理完成!")

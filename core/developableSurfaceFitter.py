@@ -1,14 +1,14 @@
 """
 直纹面拟合模块
 
-本模块实现直纹面的检测和拟合算法，用于五轴加工路径规划。
+本模块实现基于生长策略的封闭直纹面拟合算法，用于五轴加工路径规划。
 直纹面是一种由一条直线（母线）沿着两条曲线（导线）移动而生成的曲面。
 在五轴加工中，直纹面拟合可以帮助生成更高效的刀具路径，特别是对于具有直纹面特征的零件，如叶轮、叶片等。
 """
 
 import numpy as np
 import open3d as o3d
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Set
 from .meshProcessor import MeshProcessor
 
 
@@ -27,387 +27,559 @@ class DevelopableSurfaceFitter:
         self.vertices = mesh.vertices
         self.faces = mesh.faces
         self.adjacency = mesh.adjacency
+        
+        # 存储分区信息
+        self.partitions = {}
+        self.shared_edges = {}
+        self.vertex_map = {}
+        self.edge_midpoints = np.array([])
+        
+        # 阈值参数
+        self.epsilon = 0.001  # 顶点合并阈值
+        self.T = 100  # 直线边判定阈值
+        self.max_skip_count = 5  # 最大跳过次数
     
-    def detect_developable_regions(self, partition_labels: np.ndarray) -> Dict[int, bool]:
+    def fit_developable_surfaces(self, partition_labels: np.ndarray, edge_midpoints: np.ndarray) -> Dict[int, Dict[str, Any]]:
         """
-        检测每个分区是否为直纹面区域
+        拟合所有分区为直纹面
         Args:
             partition_labels: 分区标签数组
+            edge_midpoints: 边缘中点数组
         Returns:
-            分区ID到是否为直纹面的映射
+            直纹面字典，键为分区标签，值为直纹面参数
         """
-        print("检测直纹面区域...")
+        print("拟合直纹面...")
         
-        developable_regions = {}
+        # 1. 输入与预处理
+        self._preprocess(partition_labels, edge_midpoints)
+        
+        # 2. 种子分区判定
+        seed_partitions = self._identify_seed_partitions()
+        
+        # 3. 生长循环
+        developable_surfaces = self._growth_loop(seed_partitions)
+        
+        # 4. 封闭性协调
+        self._coordinate_shared_edges(developable_surfaces)
+        
+        # 5. 可视化直纹面拼接后的原曲面
+        self.visualize_developable_assembly(developable_surfaces)
+        
+        return developable_surfaces
+    
+    def _preprocess(self, partition_labels: np.ndarray, edge_midpoints: np.ndarray):
+        """
+        预处理数据
+        Args:
+            partition_labels: 分区标签数组
+            edge_midpoints: 边缘中点数组
+        """
+        print("预处理数据...")
+        
+        # 提取每个分区的边界边
         unique_labels = np.unique(partition_labels)
+        
+        # 构建边缘中点映射
+        edge_midpoint_map = {}
+        if edge_midpoints.size > 0:
+            # 存储边缘中点
+            self.edge_midpoints = edge_midpoints
+        else:
+            self.edge_midpoints = np.array([])
         
         for label in unique_labels:
             # 获取该分区的所有顶点
             partition_vertices = np.where(partition_labels == label)[0]
-            if len(partition_vertices) < 3:
-                developable_regions[label] = False
-                continue
             
-            # 计算该分区的直纹面可能性
-            is_developable = self._is_partition_developable(partition_vertices)
-            developable_regions[label] = is_developable
+            # 提取边界边
+            boundary_edges = self._extract_boundary_edges(partition_vertices, partition_labels)
             
-            if is_developable:
-                print(f"分区 {label} 被检测为直纹面区域")
+            # 提取内部点云
+            interior_points = self._extract_interior_points(partition_vertices, boundary_edges)
+            
+            # 存储分区信息
+            self.partitions[label] = {
+                'vertices': partition_vertices,
+                'boundary_edges': boundary_edges,
+                'interior_points': interior_points,
+                'known_edges': set(),
+                'skip_count': 0
+            }
         
-        return developable_regions
+        # 处理共享边
+        self._process_shared_edges()
+        
+        # 顶点合并
+        self._merge_vertices()
+        
+        # 边类型检测
+        self._detect_edge_types()
     
-    def _is_partition_developable(self, partition_vertices: np.ndarray) -> bool:
+    def _extract_boundary_edges(self, partition_vertices: np.ndarray, partition_labels: np.ndarray) -> List[List[int]]:
         """
-        判断一个分区是否为直纹面区域
+        提取分区的边界边
         Args:
             partition_vertices: 分区的顶点索引数组
+            partition_labels: 分区标签数组
         Returns:
-            是否为直纹面区域
+            边界边列表，每条边由顶点索引组成
         """
-        # 计算分区的平均曲率
-        curvatures = self.mesh.curvatures[partition_vertices]
-        avg_curvature = np.mean(curvatures)
-        
-        # 直纹面的高斯曲率为0，平均曲率通常较小
-        if avg_curvature > 0.5:  # 降低阈值，使圆柱面等直纹面能通过
-            return False
-        
-        # 检查分区的几何形状
-        # 计算分区的边界曲线
-        boundary_edges = self._extract_boundary_edges(partition_vertices)
-        if len(boundary_edges) != 2:
-            # 直纹面通常有两条边界曲线
-            return False
-        
-        # 检查两条边界曲线之间是否可以用直线连接
-        return self._check_straight_line_connection(boundary_edges)
-    
-    def _extract_boundary_edges(self, partition_vertices: np.ndarray) -> List[List[int]]:
-        """
-        提取分区的边界曲线
-        Args:
-            partition_vertices: 分区的顶点索引数组
-        Returns:
-            边界曲线列表，每条曲线由顶点索引组成
-        """
-        # 构建分区的边界边
         boundary_edges = []
         vertex_set = set(partition_vertices)
         
         # 找出所有边界边（只属于一个分区的边）
         for v in partition_vertices:
             for neighbor in self.adjacency[v]:
-                if neighbor not in vertex_set:
-                    boundary_edges.append((v, neighbor))
+                if partition_labels[neighbor] != partition_labels[v]:
+                    # 按顺序存储边，确保一致性
+                    edge = tuple(sorted([v, neighbor]))
+                    if edge not in boundary_edges:
+                        boundary_edges.append(list(edge))
         
-        # 尝试提取边界曲线
-        curves = []
-        if boundary_edges:
-            # 将边界边连接成边界曲线
-            curves = self._connect_edges(boundary_edges)
-        
-        # 如果没有边界边或提取的曲线数量不等于2，创建两条边界曲线
-        if not curves or len(curves) != 2:
-            # 对于没有边界边的情况或曲线数量不符合要求的情况
-            # 使用顶点的坐标来创建两条曲线
-            vertices = self.vertices[partition_vertices]
-            
-            # 计算分区的中心点
-            center = np.mean(vertices, axis=0)
-            
-            # 计算每个顶点到中心的距离
-            distances = np.linalg.norm(vertices - center, axis=1)
-            
-            # 找到距离最小和最大的顶点
-            min_dist = np.min(distances)
-            max_dist = np.max(distances)
-            min_dist_vertices = partition_vertices[np.isclose(distances, min_dist)]
-            max_dist_vertices = partition_vertices[np.isclose(distances, max_dist)]
-            
-            # 对顶点进行排序，形成曲线
-            def sort_vertices_by_angle(vertices):
-                """按角度排序顶点"""
-                points = self.vertices[vertices]
-                angles = []
-                for point in points:
-                    vec = point - center
-                    angle = np.arctan2(vec[1], vec[0])
-                    angles.append(angle)
-                sorted_indices = np.argsort(angles)
-                return vertices[sorted_indices]
-            
-            if len(min_dist_vertices) > 1:
-                min_dist_vertices = sort_vertices_by_angle(min_dist_vertices)
-            if len(max_dist_vertices) > 1:
-                max_dist_vertices = sort_vertices_by_angle(max_dist_vertices)
-            
-            # 如果顶点数量不足，使用其他方法创建曲线
-            if len(min_dist_vertices) < 2:
-                # 按x坐标排序
-                x_coords = vertices[:, 0]
-                sorted_indices = np.argsort(x_coords)
-                sorted_vertices = partition_vertices[sorted_indices]
-                mid = len(sorted_vertices) // 2
-                min_dist_vertices = sorted_vertices[:mid]
-                max_dist_vertices = sorted_vertices[mid:]
-            
-            return [min_dist_vertices.tolist(), max_dist_vertices.tolist()]
-        
-        return curves
+        return boundary_edges
     
-    def _connect_edges(self, edges: List[Tuple[int, int]]) -> List[List[int]]:
+    def _extract_interior_points(self, partition_vertices: np.ndarray, boundary_edges: List[List[int]]) -> List[np.ndarray]:
         """
-        将边界边连接成边界曲线
-        Args:
-            edges: 边界边列表
-        Returns:
-            边界曲线列表
-        """
-        if not edges:
-            return []
-        
-        # 构建边的字典
-        edge_dict = {}
-        for v1, v2 in edges:
-            if v1 not in edge_dict:
-                edge_dict[v1] = []
-            if v2 not in edge_dict:
-                edge_dict[v2] = []
-            edge_dict[v1].append(v2)
-            edge_dict[v2].append(v1)
-        
-        # 找到起点（度为1的顶点）
-        start_vertices = [v for v, neighbors in edge_dict.items() if len(neighbors) == 1]
-        
-        curves = []
-        visited = set()
-        
-        for start in start_vertices:
-            if start in visited:
-                continue
-            
-            curve = [start]
-            current = start
-            visited.add(current)
-            
-            while True:
-                # 找到下一个顶点
-                neighbors = edge_dict[current]
-                next_vertex = None
-                for neighbor in neighbors:
-                    if neighbor not in visited:
-                        next_vertex = neighbor
-                        break
-                
-                if next_vertex is None:
-                    break
-                
-                curve.append(next_vertex)
-                visited.add(next_vertex)
-                current = next_vertex
-            
-            if len(curve) > 1:
-                curves.append(curve)
-        
-        return curves
-    
-    def _check_straight_line_connection(self, boundary_curves: List[List[int]]) -> bool:
-        """
-        检查两条边界曲线之间是否可以用直线连接
-        Args:
-            boundary_curves: 边界曲线列表
-        Returns:
-            是否可以用直线连接
-        """
-        if len(boundary_curves) != 2:
-            return False
-        
-        curve1, curve2 = boundary_curves
-        
-        # 确保两条曲线都有足够的点
-        if len(curve1) < 2 or len(curve2) < 2:
-            return False
-        
-        # 简化检查，只检查几个关键点
-        # 检查起点
-        v1_start = curve1[0]
-        v2_start = curve2[0]
-        if not self._check_line_fit(v1_start, v2_start):
-            return False
-        
-        # 检查中点
-        v1_mid = curve1[len(curve1) // 2]
-        v2_mid = curve2[len(curve2) // 2]
-        if not self._check_line_fit(v1_mid, v2_mid):
-            return False
-        
-        # 检查终点
-        v1_end = curve1[-1]
-        v2_end = curve2[-1]
-        if not self._check_line_fit(v1_end, v2_end):
-            return False
-        
-        return True
-    
-    def _check_line_fit(self, v1: int, v2: int) -> bool:
-        """
-        检查两点之间的直线是否与曲面近似
-        Args:
-            v1: 第一个顶点索引
-            v2: 第二个顶点索引
-        Returns:
-            直线是否与曲面近似
-        """
-        # 计算直线上的点
-        p1 = self.vertices[v1]
-        p2 = self.vertices[v2]
-        
-        # 采样直线上的点
-        num_samples = 5
-        for t in np.linspace(0, 1, num_samples):
-            point = (1 - t) * p1 + t * p2
-            
-            # 找到最近的曲面点
-            distances = np.linalg.norm(self.vertices - point, axis=1)
-            nearest_idx = np.argmin(distances)
-            nearest_point = self.vertices[nearest_idx]
-            
-            # 计算距离
-            distance = np.linalg.norm(point - nearest_point)
-            if distance > 0.5:  # 降低阈值，使圆柱面的母线能通过检查
-                return False
-        
-        return True
-    
-    def fit_developable_surface(self, partition_vertices: np.ndarray, error_threshold: float = 0.01) -> Dict[str, Any]:
-        """
-        拟合直纹面
+        提取分区的内部点云
         Args:
             partition_vertices: 分区的顶点索引数组
-            error_threshold: 逼近误差阈值，用于确定直纹面类型
+            boundary_edges: 边界边列表
         Returns:
-            直纹面的参数表示
+            内部点云列表
         """
-        print("拟合直纹面...")
+        # 收集边界顶点
+        boundary_vertices = set()
+        for edge in boundary_edges:
+            boundary_vertices.update(edge)
         
-        # 提取边界曲线
-        boundary_curves = self._extract_boundary_edges(partition_vertices)
-        if len(boundary_curves) != 2:
+        # 提取内部顶点
+        interior_vertices = [v for v in partition_vertices if v not in boundary_vertices]
+        
+        # 转换为点云
+        interior_points = [self.vertices[v] for v in interior_vertices]
+        
+        return interior_points
+    
+    def _process_shared_edges(self):
+        """
+        处理共享边
+        """
+        print("处理共享边...")
+        
+        # 收集所有边界边
+        all_edges = {}
+        
+        for label, partition in self.partitions.items():
+            for edge in partition['boundary_edges']:
+                edge_key = tuple(edge)
+                if edge_key not in all_edges:
+                    all_edges[edge_key] = []
+                all_edges[edge_key].append(label)
+        
+        # 识别共享边
+        for edge_key, labels in all_edges.items():
+            if len(labels) > 1:
+                self.shared_edges[edge_key] = labels
+    
+    def _merge_vertices(self):
+        """
+        合并顶点
+        """
+        print("合并顶点...")
+        
+        # 收集所有顶点
+        all_vertices = []
+        for label, partition in self.partitions.items():
+            all_vertices.extend(partition['vertices'])
+        
+        # 计算两两顶点之间的距离，合并距离小于阈值的顶点
+        merged = {}
+        for i, v1 in enumerate(all_vertices):
+            if v1 not in merged:
+                merged[v1] = v1
+                for v2 in all_vertices[i+1:]:
+                    if v2 not in merged:
+                        distance = np.linalg.norm(self.vertices[v1] - self.vertices[v2])
+                        if distance < self.epsilon:
+                            merged[v2] = v1
+        
+        # 更新顶点映射
+        self.vertex_map = merged
+        
+        # 更新分区的边界边
+        for label, partition in self.partitions.items():
+            # 更新边界边
+            updated_edges = []
+            for edge in partition['boundary_edges']:
+                updated_edge = [self.vertex_map.get(v, v) for v in edge]
+                updated_edges.append(updated_edge)
+            partition['boundary_edges'] = updated_edges
+    
+    def _detect_edge_types(self):
+        """
+        检测边类型
+        """
+        print("检测边类型...")
+        
+        for label, partition in self.partitions.items():
+            edge_types = {}
+            for edge in partition['boundary_edges']:
+                # 提取边上的点
+                edge_points = [self.vertices[v] for v in edge]
+                
+                # 主成分分析
+                if len(edge_points) > 1:
+                    mean = np.mean(edge_points, axis=0)
+                    centered = edge_points - mean
+                    cov = np.cov(centered.T)
+                    eigenvalues, _ = np.linalg.eigh(cov)
+                    eigenvalues = sorted(eigenvalues, reverse=True)
+                    
+                    # 判定边类型
+                    if eigenvalues[0] / (eigenvalues[1] + 1e-8) > self.T:
+                        edge_types[tuple(edge)] = 'straight'
+                    else:
+                        edge_types[tuple(edge)] = 'curved'
+                else:
+                    edge_types[tuple(edge)] = 'straight'
+            
+            partition['edge_types'] = edge_types
+    
+    def _identify_seed_partitions(self) -> List[int]:
+        """
+        识别种子分区
+        Returns:
+            种子分区标签列表
+        """
+        print("识别种子分区...")
+        
+        seed_partitions = []
+        
+        # 首先尝试识别三角形和四边形分区
+        for label, partition in self.partitions.items():
+            boundary_edges = partition['boundary_edges']
+            
+            # 三角形分区
+            if len(boundary_edges) == 3:
+                # 检查是否构成三角形
+                vertices = set()
+                for edge in boundary_edges:
+                    vertices.update(edge)
+                if len(vertices) == 3:
+                    seed_partitions.append(label)
+                    # 标记边为已知
+                    for edge in boundary_edges:
+                        partition['known_edges'].add(tuple(edge))
+            
+            # 四边形分区
+            elif len(boundary_edges) == 4:
+                # 检查是否构成四边形
+                vertices = set()
+                for edge in boundary_edges:
+                    vertices.update(edge)
+                if len(vertices) == 4:
+                    seed_partitions.append(label)
+                    # 标记边为已知
+                    for edge in boundary_edges:
+                        partition['known_edges'].add(tuple(edge))
+        
+        # 如果没有识别到种子分区，选择一些分区作为种子
+        if len(seed_partitions) == 0:
+            print("没有识别到三角形或四边形分区，选择其他分区作为种子")
+            # 按分区大小排序，选择中等大小的分区
+            sorted_partitions = sorted(self.partitions.items(), key=lambda x: len(x[1]['vertices']))
+            # 选择中间的几个分区作为种子
+            mid_index = len(sorted_partitions) // 2
+            for i in range(max(0, mid_index - 1), min(len(sorted_partitions), mid_index + 2)):
+                label, partition = sorted_partitions[i]
+                seed_partitions.append(label)
+                # 标记边为已知
+                for edge in partition['boundary_edges']:
+                    partition['known_edges'].add(tuple(edge))
+        
+        print(f"识别到 {len(seed_partitions)} 个种子分区")
+        return seed_partitions
+    
+    def _growth_loop(self, seed_partitions: List[int]) -> Dict[int, Dict[str, Any]]:
+        """
+        生长循环
+        Args:
+            seed_partitions: 种子分区标签列表
+        Returns:
+            直纹面字典
+        """
+        print("生长循环...")
+        
+        developable_surfaces = {}
+        queue = seed_partitions.copy()
+        processed = set()
+        
+        # 首先处理队列中的分区
+        while queue:
+            # 取出一个分区
+            label = queue.pop(0)
+            if label in processed:
+                continue
+            processed.add(label)
+            
+            partition = self.partitions[label]
+            
+            # 统计已知边
+            known_edges = partition['known_edges']
+            boundary_edges = partition['boundary_edges']
+            
+            # 根据分区形状和已知边信息选择拟合策略
+            if len(boundary_edges) == 3:
+                # 三角形分区
+                surface = self._fit_triangular_partition(label, partition)
+            elif len(boundary_edges) == 4:
+                # 四边形分区
+                surface = self._fit_quadrilateral_partition(label, partition)
+            else:
+                # 其他情况
+                surface = self._fit_general_partition(label, partition)
+            
+            if surface:
+                developable_surfaces[label] = surface
+                
+                # 将新确定的边标记为已知，并更新相邻分区
+                for edge in boundary_edges:
+                    edge_key = tuple(edge)
+                    if edge_key not in known_edges:
+                        partition['known_edges'].add(edge_key)
+                        
+                        # 找到相邻分区
+                        if edge_key in self.shared_edges:
+                            for neighbor_label in self.shared_edges[edge_key]:
+                                if neighbor_label != label and neighbor_label not in processed:
+                                    neighbor_partition = self.partitions[neighbor_label]
+                                    neighbor_partition['known_edges'].add(edge_key)
+                                    if neighbor_label not in queue:
+                                        queue.append(neighbor_label)
+            else:
+                # 增加跳过计数
+                partition['skip_count'] += 1
+                if partition['skip_count'] < self.max_skip_count:
+                    queue.append(label)
+                else:
+                    # 强制拟合
+                    surface = self._force_fit_partition(label, partition)
+                    if surface:
+                        developable_surfaces[label] = surface
+        
+        # 处理未处理的分区
+        print(f"处理了 {len(processed)} 个分区，开始处理剩余分区...")
+        for label, partition in self.partitions.items():
+            if label not in processed:
+                # 强制拟合
+                surface = self._force_fit_partition(label, partition)
+                if surface:
+                    developable_surfaces[label] = surface
+        
+        print(f"生长循环完成，拟合了 {len(developable_surfaces)} 个直纹面")
+        return developable_surfaces
+    
+    def _fit_triangular_partition(self, label: int, partition: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        拟合三角形分区
+        Args:
+            label: 分区标签
+            partition: 分区信息
+        Returns:
+            直纹面参数
+        """
+        # 实现三角形分区的拟合
+        boundary_edges = partition['boundary_edges']
+        known_edges = partition['known_edges']
+        interior_points = partition['interior_points']
+        
+        # 检查已知边数量
+        if len(known_edges) < 2:
             return None
         
-        curve1, curve2 = boundary_curves
+        # 找到公共顶点
+        edge_vertices = []
+        for edge in known_edges:
+            edge_vertices.extend(edge)
         
-        # 确定直纹面类型（直线端或尖锐端）
-        curve1_type = self._determine_curve_type(curve1, error_threshold)
-        curve2_type = self._determine_curve_type(curve2, error_threshold)
+        # 统计顶点出现次数
+        vertex_count = {}
+        for v in edge_vertices:
+            vertex_count[v] = vertex_count.get(v, 0) + 1
         
-        # 拟合两条边界曲线
-        curve1_fit = self._fit_curve([self.vertices[v] for v in curve1], curve1_type)
-        curve2_fit = self._fit_curve([self.vertices[v] for v in curve2], curve2_type)
+        # 公共顶点是出现次数为2的顶点
+        common_vertex = None
+        for v, count in vertex_count.items():
+            if count == 2:
+                common_vertex = v
+                break
         
-        # 生成直纹面的参数表示
-        developable_surface = {
-            'type': 'developable',
-            'curve1': curve1_fit,
-            'curve2': curve2_fit,
-            'curve1_type': curve1_type,
-            'curve2_type': curve2_type,
-            'vertices': partition_vertices,
-            'error_threshold': error_threshold
+        if not common_vertex:
+            return None
+        
+        # 找到另外两个顶点
+        other_vertices = []
+        for edge in known_edges:
+            for v in edge:
+                if v != common_vertex:
+                    other_vertices.append(v)
+        
+        if len(other_vertices) != 2:
+            return None
+        
+        A, B = other_vertices
+        
+        # 拟合第三条边
+        third_edge = None
+        for edge in boundary_edges:
+            edge_key = tuple(edge)
+            if edge_key not in known_edges:
+                third_edge = edge
+                break
+        
+        if third_edge:
+            # 拟合曲线
+            curve = self._fit_curve([self.vertices[v] for v in third_edge])
+        else:
+            # 直接连接A和B
+            curve = {
+                'type': 'line',
+                'start_point': self.vertices[A].tolist(),
+                'end_point': self.vertices[B].tolist()
+            }
+        
+        # 生成直纹面
+        surface = {
+            'type': 'conical',
+            'vertex': self.vertices[common_vertex].tolist(),
+            'curve': curve,
+            'vertices': partition['vertices'],
+            'label': label
         }
         
-        return developable_surface
+        return surface
     
-    def _determine_curve_type(self, curve: List[int], error_threshold: float) -> str:
+    def _fit_quadrilateral_partition(self, label: int, partition: Dict[str, Any]) -> Dict[str, Any]:
         """
-        确定曲线类型（直线或尖锐）
+        拟合四边形分区
         Args:
-            curve: 曲线的顶点索引列表
-            error_threshold: 逼近误差阈值
+            label: 分区标签
+            partition: 分区信息
         Returns:
-            曲线类型：'straight' 或 'sharp'
+            直纹面参数
         """
-        # 检查曲线是否为空
-        if not curve:
-            return 'straight'
+        # 实现四边形分区的拟合
+        boundary_edges = partition['boundary_edges']
+        known_edges = partition['known_edges']
+        interior_points = partition['interior_points']
         
-        # 计算曲线的长度
-        curve_points = [self.vertices[v] for v in curve]
+        # 检查已知边数量
+        if len(known_edges) < 2:
+            return None
         
-        # 检查曲线点是否为空
-        if len(curve_points) < 2:
-            return 'straight'
+        # 找到两条相对的直线边
+        straight_edges = []
+        for edge in known_edges:
+            if partition['edge_types'].get(edge) == 'straight':
+                straight_edges.append(edge)
         
-        curve_length = 0
-        for i in range(1, len(curve_points)):
-            curve_length += np.linalg.norm(curve_points[i] - curve_points[i-1])
+        if len(straight_edges) < 2:
+            return None
         
-        # 计算曲线的直线拟合误差
-        start_point = curve_points[0]
-        end_point = curve_points[-1]
-        line_vector = end_point - start_point
-        line_length = np.linalg.norm(line_vector)
+        # 假设前两条为相对边
+        L0, L1 = straight_edges[:2]
+        P00, P01 = L0
+        P10, P11 = L1
         
-        # 避免除以零
-        if line_length < 1e-8:
-            return 'straight'
+        # 拟合两条曲线边
+        curve0 = self._fit_curve([self.vertices[P00], self.vertices[P10]])
+        curve1 = self._fit_curve([self.vertices[P01], self.vertices[P11]])
         
-        max_error = 0
-        for point in curve_points[1:-1]:
-            # 计算点到直线的距离
-            vector_to_point = point - start_point
-            projection = np.dot(vector_to_point, line_vector) / line_length
-            projected_point = start_point + (projection / line_length) * line_vector
-            error = np.linalg.norm(point - projected_point)
-            max_error = max(max_error, error)
+        # 生成直纹面
+        surface = {
+            'type': 'developable',
+            'curve0': curve0,
+            'curve1': curve1,
+            'vertices': partition['vertices'],
+            'label': label
+        }
         
-        # 根据误差阈值确定曲线类型
-        if max_error < error_threshold:
-            return 'straight'
-        else:
-            # 检查是否有尖锐点
-            if self._has_sharp_points(curve, error_threshold):
-                return 'sharp'
-            else:
-                return 'curved'
+        return surface
     
-    def _has_sharp_points(self, curve: List[int], error_threshold: float) -> bool:
+    def _fit_general_partition(self, label: int, partition: Dict[str, Any]) -> Dict[str, Any]:
         """
-        检查曲线是否有尖锐点
+        拟合一般分区
         Args:
-            curve: 曲线的顶点索引列表
-            error_threshold: 逼近误差阈值
+            label: 分区标签
+            partition: 分区信息
         Returns:
-            是否有尖锐点
+            直纹面参数
         """
-        curve_points = [self.vertices[v] for v in curve]
+        # 实现一般分区的拟合
+        boundary_edges = partition['boundary_edges']
+        known_edges = partition['known_edges']
         
-        for i in range(1, len(curve_points) - 1):
-            # 计算前后向量
-            vec1 = curve_points[i] - curve_points[i-1]
-            vec2 = curve_points[i+1] - curve_points[i]
-            
-            # 归一化
-            vec1 /= np.linalg.norm(vec1)
-            vec2 /= np.linalg.norm(vec2)
-            
-            # 计算夹角
-            dot_product = np.dot(vec1, vec2)
-            angle = np.arccos(max(-1, min(1, dot_product)))
-            
-            # 如果夹角小于阈值，认为是尖锐点
-            if angle < np.pi / 3:  # 60度
-                return True
+        # 检查已知边数量
+        if len(known_edges) < 2:
+            return None
         
-        return False
+        # 简单实现：使用两条已知边作为母线
+        known_edge_list = list(known_edges)
+        edge1, edge2 = known_edge_list[:2]
+        
+        # 拟合曲线
+        curve1 = self._fit_curve([self.vertices[v] for v in edge1])
+        curve2 = self._fit_curve([self.vertices[v] for v in edge2])
+        
+        # 生成直纹面
+        surface = {
+            'type': 'developable',
+            'curve1': curve1,
+            'curve2': curve2,
+            'vertices': partition['vertices'],
+            'label': label
+        }
+        
+        return surface
     
-    def _fit_curve(self, points: List[np.ndarray], curve_type: str = 'curved') -> Dict[str, Any]:
+    def _force_fit_partition(self, label: int, partition: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        强制拟合分区
+        Args:
+            label: 分区标签
+            partition: 分区信息
+        Returns:
+            直纹面参数
+        """
+        # 实现强制拟合
+        boundary_edges = partition['boundary_edges']
+        
+        if len(boundary_edges) < 2:
+            return None
+        
+        # 使用前两条边作为母线
+        edge1, edge2 = boundary_edges[:2]
+        
+        # 拟合曲线
+        curve1 = self._fit_curve([self.vertices[v] for v in edge1])
+        curve2 = self._fit_curve([self.vertices[v] for v in edge2])
+        
+        # 生成直纹面
+        surface = {
+            'type': 'developable',
+            'curve1': curve1,
+            'curve2': curve2,
+            'vertices': partition['vertices'],
+            'label': label
+        }
+        
+        return surface
+    
+    def _fit_curve(self, points: List[np.ndarray]) -> Dict[str, Any]:
         """
         拟合曲线
         Args:
             points: 曲线上的点
-            curve_type: 曲线类型：'straight', 'sharp', 'curved'
         Returns:
             曲线的参数表示
         """
@@ -436,139 +608,78 @@ class DevelopableSurfaceFitter:
         # 参数化
         t = np.linspace(0, 1, n)
         
-        if curve_type == 'straight':
-            # 直线拟合
-            start_point = points[0]
-            end_point = points[-1]
-            return {
-                'type': 'line',
-                'start_point': start_point.tolist(),
-                'end_point': end_point.tolist()
-            }
-        else:
-            # 使用多项式拟合
-            degree = min(3, n - 1)  # 使用3次多项式或更低
-            
-            # 拟合x, y, z坐标
-            coeffs_x = np.polyfit(t, points[:, 0], degree)
-            coeffs_y = np.polyfit(t, points[:, 1], degree)
-            coeffs_z = np.polyfit(t, points[:, 2], degree)
-            
-            return {
-                'type': 'polynomial',
-                'degree': degree,
-                'coeffs_x': coeffs_x.tolist(),
-                'coeffs_y': coeffs_y.tolist(),
-                'coeffs_z': coeffs_z.tolist()
-            }
+        # 使用多项式拟合
+        degree = min(3, n - 1)  # 使用3次多项式或更低
+        
+        # 拟合x, y, z坐标
+        coeffs_x = np.polyfit(t, points[:, 0], degree)
+        coeffs_y = np.polyfit(t, points[:, 1], degree)
+        coeffs_z = np.polyfit(t, points[:, 2], degree)
+        
+        return {
+            'type': 'polynomial',
+            'degree': degree,
+            'coeffs_x': coeffs_x.tolist(),
+            'coeffs_y': coeffs_y.tolist(),
+            'coeffs_z': coeffs_z.tolist()
+        }
     
-    def generate_tool_paths_for_developable(self, surface: Dict[str, Any], tool) -> List[Dict[str, Any]]:
+    def _coordinate_shared_edges(self, developable_surfaces: Dict[int, Dict[str, Any]]):
         """
-        为直纹面生成刀具路径
+        协调共享边
         Args:
-            surface: 直纹面的参数表示
-            tool: 刀具对象
-        Returns:
-            刀具路径列表
+            developable_surfaces: 直纹面字典
         """
-        print("为直纹面生成刀具路径...")
+        print("协调共享边...")
         
-        paths = []
+        # 收集所有共享边的拟合结果
+        edge_curves = {}
         
-        # 生成参数化的刀具路径
-        num_paths = 20  # 路径数量
+        for label, surface in developable_surfaces.items():
+            partition = self.partitions[label]
+            for edge in partition['boundary_edges']:
+                edge_key = tuple(edge)
+                if edge_key in self.shared_edges:
+                    # 提取边的曲线
+                    if surface['type'] == 'conical':
+                        curve = surface['curve']
+                    else:
+                        # 简单实现：使用第一条曲线
+                        curve = surface.get('curve1', surface.get('curve0'))
+                    
+                    if edge_key not in edge_curves:
+                        edge_curves[edge_key] = []
+                    edge_curves[edge_key].append(curve)
         
-        for i in range(num_paths):
-            t = i / (num_paths - 1)
-            
-            # 计算当前参数下的母线
-            path_points = []
-            path_orientations = []
-            
-            # 采样母线上的点
-            num_points = 50
-            for s in np.linspace(0, 1, num_points):
-                # 计算母线上的点
-                point = self._evaluate_developable(surface, t, s)
+        # 计算平均曲线
+        for edge_key, curves in edge_curves.items():
+            if len(curves) > 1:
+                # 简单实现：对控制点取平均
+                avg_curve = self._average_curves(curves)
                 
-                # 计算刀具方向
-                orientation = self._calculate_tool_orientation(surface, t, s)
-                
-                path_points.append(point)
-                path_orientations.append(orientation)
-            
-            paths.append({
-                'points': path_points,
-                'orientations': path_orientations,
-                'type': 'developable_path'
-            })
-        
-        return paths
+                # 更新相关分区的直纹面
+                for label in self.shared_edges[edge_key]:
+                    if label in developable_surfaces:
+                        surface = developable_surfaces[label]
+                        if surface['type'] == 'conical':
+                            surface['curve'] = avg_curve
+                        else:
+                            # 简单实现：更新第一条曲线
+                            if 'curve1' in surface:
+                                surface['curve1'] = avg_curve
+                            if 'curve0' in surface:
+                                surface['curve0'] = avg_curve
     
-    def _evaluate_developable(self, surface: Dict[str, Any], t: float, s: float) -> np.ndarray:
+    def _average_curves(self, curves: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        计算直纹面上的点
+        计算平均曲线
         Args:
-            surface: 直纹面的参数表示
-            t: 曲线参数
-            s: 母线参数
+            curves: 曲线列表
         Returns:
-            直纹面上的点
+            平均曲线
         """
-        # 计算两条曲线上的点
-        p1 = self._evaluate_curve(surface['curve1'], t)
-        p2 = self._evaluate_curve(surface['curve2'], t)
-        
-        # 计算母线上的点
-        return (1 - s) * p1 + s * p2
-    
-    def _evaluate_curve(self, curve: Dict[str, Any], t: float) -> np.ndarray:
-        """
-        计算曲线上的点
-        Args:
-            curve: 曲线的参数表示
-            t: 参数
-        Returns:
-            曲线上的点
-        """
-        if curve['type'] == 'polynomial':
-            x = np.polyval(curve['coeffs_x'], t)
-            y = np.polyval(curve['coeffs_y'], t)
-            z = np.polyval(curve['coeffs_z'], t)
-            return np.array([x, y, z])
-        elif curve['type'] == 'line':
-            start_point = np.array(curve['start_point'])
-            end_point = np.array(curve['end_point'])
-            return (1 - t) * start_point + t * end_point
-        else:
-            raise ValueError(f"不支持的曲线类型: {curve['type']}")
-    
-    def _calculate_tool_orientation(self, surface: Dict[str, Any], t: float, s: float) -> np.ndarray:
-        """
-        计算直纹面上点的刀具方向
-        Args:
-            surface: 直纹面的参数表示
-            t: 曲线参数
-            s: 母线参数
-        Returns:
-            刀具方向
-        """
-        # 计算母线方向
-        p1 = self._evaluate_curve(surface['curve1'], t)
-        p2 = self._evaluate_curve(surface['curve2'], t)
-        generator_direction = p2 - p1
-        
-        # 计算曲线切线方向
-        dt = 1e-6
-        p1_dt = self._evaluate_curve(surface['curve1'], t + dt)
-        p1_dt_minus = self._evaluate_curve(surface['curve1'], t - dt)
-        tangent = p1_dt - p1_dt_minus
-        
-        # 计算法向量
-        normal = np.cross(generator_direction, tangent)
-        normal /= np.linalg.norm(normal)
-        
-        return normal
+        # 简单实现：返回第一条曲线
+        return curves[0]
     
     def visualize_developable_assembly(self, developable_surfaces: Dict[int, Dict[str, Any]]):
         """
@@ -643,3 +754,54 @@ class DevelopableSurfaceFitter:
         mesh.compute_vertex_normals()
         
         return mesh
+    
+    def _evaluate_developable(self, surface: Dict[str, Any], t: float, s: float) -> np.ndarray:
+        """
+        计算直纹面上的点
+        Args:
+            surface: 直纹面的参数表示
+            t: 曲线参数
+            s: 母线参数
+        Returns:
+            直纹面上的点
+        """
+        if surface['type'] == 'conical':
+            # 锥面
+            vertex = np.array(surface['vertex'])
+            curve_point = self._evaluate_curve(surface['curve'], t)
+            return vertex + s * (curve_point - vertex)
+        else:
+            # 直纹面
+            if 'curve1' in surface and 'curve2' in surface:
+                p1 = self._evaluate_curve(surface['curve1'], t)
+                p2 = self._evaluate_curve(surface['curve2'], t)
+            elif 'curve0' in surface and 'curve1' in surface:
+                p1 = self._evaluate_curve(surface['curve0'], t)
+                p2 = self._evaluate_curve(surface['curve1'], t)
+            else:
+                # 默认返回原点
+                return np.array([0.0, 0.0, 0.0])
+            
+            # 计算母线上的点
+            return (1 - s) * p1 + s * p2
+    
+    def _evaluate_curve(self, curve: Dict[str, Any], t: float) -> np.ndarray:
+        """
+        计算曲线上的点
+        Args:
+            curve: 曲线的参数表示
+            t: 参数
+        Returns:
+            曲线上的点
+        """
+        if curve['type'] == 'polynomial':
+            x = np.polyval(curve['coeffs_x'], t)
+            y = np.polyval(curve['coeffs_y'], t)
+            z = np.polyval(curve['coeffs_z'], t)
+            return np.array([x, y, z])
+        elif curve['type'] == 'line':
+            start_point = np.array(curve['start_point'])
+            end_point = np.array(curve['end_point'])
+            return (1 - t) * start_point + t * end_point
+        else:
+            raise ValueError(f"不支持的曲线类型: {curve['type']}")
