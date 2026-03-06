@@ -6,6 +6,8 @@ from .toolOrientationField import ToolOrientationField
 from .isoScallopField import IsoScallopFieldGenerator
 from .pathGenerator import PathGenerator
 from .surfaceGenerator import SurfaceGenerator
+from .developableSurfaceFitter import DevelopableSurfaceFitter
+from .neuralDevelopableSurfaceFitter import NeuralDevelopableSurfaceFitter, NeuralDevelopableSurfaceFitterWrapper
 
 __all__ = [
     'MeshProcessor',
@@ -15,5 +17,8 @@ __all__ = [
     'ToolOrientationField',
     'IsoScallopFieldGenerator',
     'PathGenerator',
-    'SurfaceGenerator'
+    'SurfaceGenerator',
+    'DevelopableSurfaceFitter',
+    'NeuralDevelopableSurfaceFitter',
+    'NeuralDevelopableSurfaceFitterWrapper'
 ]

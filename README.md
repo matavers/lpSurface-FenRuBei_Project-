@@ -78,6 +78,29 @@
    pip install -r requirements.txt
    ```
 
+### GPU加速配置步骤
+
+1. 安装CUDA 12.8：
+   - 从NVIDIA官网下载并安装CUDA 12.8 Toolkit
+   - 确保系统环境变量已正确设置
+
+2. 安装PyTorch（CUDA 12.8版本）：
+   ```bash
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+   ```
+
+3. 验证GPU加速：
+   ```python
+   import torch
+   print(torch.cuda.is_available())  # 应返回True
+   print(torch.cuda.get_device_name(0))  # 应显示GPU名称
+   ```
+
+4. 调整批处理大小以优化GPU内存使用：
+   - 打开`config/settings.json`文件
+   - 修改`neural_network.batch_size`参数
+   - 对于RTX 5060 Laptop，建议batch_size设置为32-64
+
 ## 使用方法
 
 ### 基本使用
@@ -216,8 +239,8 @@ python utils/visualize_results.py
 11. **可视化**：在一个窗口中显示颜色块标示的分区和中点，优化边缘显示
 12. **网格可视化**：在执行核心算法前可视化当前操作的网格，确认采样效果
 13. **分区结果保存和加载**：支持将分区结果保存到文件并加载
-14. **直纹面拟合**：根据逼近误差阈值确定直纹面类型，通过样条曲线拟合为直纹面
-15. **直纹面类型检测**：自动检测直纹面的直线端或尖锐端，确定直线或尖端所在位置
+14. **神经网络直纹面拟合**：基于PointNet++和编码器-解码器架构的直纹面拟合，支持三角形和四边形分区
+15. **GPU加速**：利用NVIDIA GeForce RTX 5060 Laptop GPU进行并行计算，提高拟合速度
 
 ## 系统配置
 
@@ -227,6 +250,37 @@ python utils/visualize_results.py
 - 分区参数（resolution参数控制分区数量）
 - 可视化设置
 - 路径生成参数
+- 神经网络参数（batch_size, learning_rate等）
+
+## GPU环境要求
+
+### CUDA版本兼容性
+- **推荐CUDA版本**：12.8
+- **GPU要求**：NVIDIA GeForce RTX 5060 Laptop或更高
+- **驱动版本**：32.0.15.7324或更高
+
+### 性能优化建议
+- 确保GPU驱动程序已更新至最新版本
+- 调整batch_size参数以充分利用GPU内存
+- 对于大型模型，考虑使用混合精度训练
+- 在推理时启用CUDA推理加速
+
+## 神经网络直纹面拟合
+
+### 架构概述
+- **编码器**：使用PointNet++处理内部点云，一维卷积处理边缘点列
+- **解码器**：三层全连接网络生成B样条曲线控制点
+- **损失函数**：Chamfer距离、边缘约束、平滑项、端点约束
+
+### 输入数据格式
+- **内部点云**：无序三维点集（1000-5000点）
+- **边缘点列**：每条边的有序点序列，附带相邻分区标记
+- **分区类型**：三角形或四边形（one-hot向量）
+
+### 与原有系统的接口方式
+- 保持原有`fit_developable_surfaces`函数接口不变
+- 内部自动切换到神经网络模型进行拟合
+- 支持回退到传统算法（当神经网络拟合失败时）
 
 ## 输出结果
 
