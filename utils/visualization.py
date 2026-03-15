@@ -186,6 +186,11 @@ class Visualizer:
             partition_labels: 分区标签数组
             edge_midpoints: 边缘中点数组
         """
+        # 检查网格是否有效
+        if not mesh or len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
+            print("警告: 网格无效，跳过可视化")
+            return
+        
         # 创建网格副本
         new_mesh = o3d.geometry.TriangleMesh()
         new_mesh.vertices = o3d.utility.Vector3dVector(np.asarray(mesh.vertices))
@@ -213,8 +218,9 @@ class Visualizer:
 
         # 创建边缘中点云
         print(f"创建边缘中点云: {len(edge_midpoints)} 个点")
-        midpoint_pcd = o3d.geometry.PointCloud()
+        midpoint_pcd = None
         if len(edge_midpoints) > 0:
+            midpoint_pcd = o3d.geometry.PointCloud()
             midpoint_pcd.points = o3d.utility.Vector3dVector(edge_midpoints)
             # 设置中点颜色为红色
             midpoint_pcd.paint_uniform_color([1, 0, 0])
@@ -223,25 +229,28 @@ class Visualizer:
         print(f"分区和中点可视化完成: {num_partitions} 个分区, {len(edge_midpoints)} 个中点")
         print(f"分区质量: {quality_metrics['overall_quality']:.4f}")
         
-        # 创建可视化窗口
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=f"分区和中点可视化: {num_partitions} 个分区 (质量: {quality_metrics['overall_quality']:.2f})", width=1024, height=768)
-        
-        # 添加网格
-        vis.add_geometry(new_mesh)
-        # 只有当有中点时才添加
-        if len(edge_midpoints) > 0:
-            vis.add_geometry(midpoint_pcd)
-        
-        # 设置渲染选项
-        render_option = vis.get_render_option()
-        render_option.mesh_show_back_face = True
-        render_option.mesh_show_wireframe = False  # 关闭线框模式，确保颜色显示
-        render_option.background_color = np.array([1, 1, 1])  # 白色背景
-        
-        # 运行可视化
-        vis.run()
-        vis.destroy_window()
+        try:
+            # 创建可视化窗口
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name=f"分区和中点可视化: {num_partitions} 个分区 (质量: {quality_metrics['overall_quality']:.2f})", width=1024, height=768)
+            
+            # 添加网格
+            vis.add_geometry(new_mesh)
+            # 只有当有中点时才添加
+            if midpoint_pcd is not None:
+                vis.add_geometry(midpoint_pcd)
+            
+            # 设置渲染选项
+            render_option = vis.get_render_option()
+            render_option.mesh_show_back_face = True
+            render_option.mesh_show_wireframe = False  # 关闭线框模式，确保颜色显示
+            render_option.background_color = np.array([1, 1, 1])  # 白色背景
+            
+            # 运行可视化
+            vis.run()
+            vis.destroy_window()
+        except Exception as e:
+            print(f"可视化失败: {e}")
 
     def visualize_tool_orientations(self, mesh: o3d.geometry.TriangleMesh,
                                     tool_orientations: np.ndarray,

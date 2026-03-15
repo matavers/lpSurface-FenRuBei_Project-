@@ -1,398 +1,320 @@
 """
-数据生成工具
+NURBS直纹面训练数据生成器
 
-用于生成直纹面训练的合成数据，包括四边形和三角形分区。
+本脚本用于生成训练EdgePointToNURBSSurfaceNet所需的数据集。
 """
 
 import numpy as np
 import os
-from typing import Tuple, List, Dict, Any
+import json
+from datetime import datetime
 
 
-class DevelopableSurfaceDataGenerator:
+class NURBSSurfaceDataGenerator:
     """
-    直纹面数据生成器
+    NURBS直纹面数据生成器
     """
     
-    def __init__(self, M: int = 16, num_samples: int = 1000):
+    def __init__(self, output_dir='dataset'):
         """
         初始化数据生成器
         Args:
-            M: B样条曲线的控制点数量
-            num_samples: 生成的样本数量
+            output_dir: 输出目录
         """
-        self.M = M
-        self.num_samples = num_samples
+        self.output_dir = output_dir
+        self.train_dir = os.path.join(output_dir, 'train')
+        self.test_dir = os.path.join(output_dir, 'test')
         
-    def generate_quadrilateral_sample(self) -> Dict[str, Any]:
-        """
-        生成四边形分区样本
-        Returns:
-            样本字典，包含内部点云、边缘点列、角点、分区类型
-        """
-        # 随机生成两条B样条曲线的控制点
-        # 曲线A的控制点
-        curve_A_control = np.random.randn(self.M, 3) * 0.3
-        # 固定端点
-        curve_A_control[0] = np.array([-1.0, 0.0, 0.0])
-        curve_A_control[-1] = np.array([1.0, 0.0, 0.0])
-        
-        # 曲线B的控制点
-        curve_B_control = np.random.randn(self.M, 3) * 0.3
-        curve_B_control[0] = np.array([-1.0, 1.0, 0.0])
-        curve_B_control[-1] = np.array([1.0, 1.0, 0.0])
-        
-        # 生成曲面上的点（直纹面）
-        u_values = np.linspace(0, 1, 32)
-        v_values = np.linspace(0, 1, 32)
-        
-        surface_points = []
-        for u in u_values:
-            for v in v_values:
-                # 计算曲线A上的点
-                point_A = self._evaluate_bspline(curve_A_control, u)
-                # 计算曲线B上的点
-                point_B = self._evaluate_bspline(curve_B_control, u)
-                # 线性插值生成直纹面点
-                point = (1 - v) * point_A + v * point_B
-                surface_points.append(point)
-        
-        surface_points = np.array(surface_points)
-        
-        # 采样内部点云
-        interior_indices = np.random.choice(len(surface_points), min(2000, len(surface_points)), replace=False)
-        interior_points = surface_points[interior_indices]
-        
-        # 添加高斯噪声
-        noise = np.random.randn(*interior_points.shape) * 0.01
-        interior_points = interior_points + noise
-        
-        # 提取边缘点列
-        edge_A = surface_points[::32]  # v=0的边
-        edge_B = surface_points[31::32]  # v=1的边
-        edge_C = surface_points[:32]  # u=0的边
-        edge_D = surface_points[32*31:]  # u=1的边
-        
-        # 添加噪声到边缘点
-        edge_A = edge_A + np.random.randn(*edge_A.shape) * 0.01
-        edge_B = edge_B + np.random.randn(*edge_B.shape) * 0.01
-        edge_C = edge_C + np.random.randn(*edge_C.shape) * 0.01
-        edge_D = edge_D + np.random.randn(*edge_D.shape) * 0.01
-        
-        # 提取角点
-        corners = [
-            curve_A_control[0],  # v00
-            curve_A_control[-1],  # v01
-            curve_B_control[0],  # v10
-            curve_B_control[-1]   # v11
-        ]
-        
-        return {
-            'interior_points': interior_points,
-            'edge_points': [edge_A, edge_B, edge_C, edge_D],
-            'corners': corners,
-            'curve_A_control': curve_A_control,
-            'curve_B_control': curve_B_control,
-            'partition_type': 'quadrilateral'
-        }
+        # 创建目录
+        os.makedirs(self.train_dir, exist_ok=True)
+        os.makedirs(self.test_dir, exist_ok=True)
     
-    def generate_triangle_sample(self) -> Dict[str, Any]:
+    def generate_nurbs_curve(self, num_control_points=16, degree=3, straight=False):
         """
-        生成三角形分区样本（锥面）
-        Returns:
-            样本字典，包含内部点云、边缘点列、角点、分区类型
-        """
-        # 随机生成顶点
-        vertex = np.random.randn(3) * 0.3 + np.array([0.0, 0.5, 0.5])
-        
-        # 随机生成一条B样条曲线
-        curve_control = np.random.randn(self.M, 3) * 0.3
-        curve_control[0] = np.array([-1.0, -0.5, 0.0])
-        curve_control[-1] = np.array([1.0, -0.5, 0.0])
-        
-        # 生成锥面上的点
-        u_values = np.linspace(0, 1, 32)
-        v_values = np.linspace(0, 1, 32)
-        
-        surface_points = []
-        for u in u_values:
-            for v in v_values:
-                curve_point = self._evaluate_bspline(curve_control, u)
-                point = vertex + v * (curve_point - vertex)
-                surface_points.append(point)
-        
-        surface_points = np.array(surface_points)
-        
-        # 采样内部点云
-        interior_indices = np.random.choice(len(surface_points), min(2000, len(surface_points)), replace=False)
-        interior_points = surface_points[interior_indices]
-        
-        # 添加高斯噪声
-        noise = np.random.randn(*interior_points.shape) * 0.01
-        interior_points = interior_points + noise
-        
-        # 提取边缘点列
-        edge_A = surface_points[::32]  # 曲线边
-        edge_B = np.array([vertex + v * (curve_control[0] - vertex) for v in np.linspace(0, 1, 32)])  # 顶点到曲线起点
-        edge_C = np.array([vertex + v * (curve_control[-1] - vertex) for v in np.linspace(0, 1, 32)])  # 顶点到曲线终点
-        
-        # 添加噪声到边缘点
-        edge_A = edge_A + np.random.randn(*edge_A.shape) * 0.01
-        edge_B = edge_B + np.random.randn(*edge_B.shape) * 0.01
-        edge_C = edge_C + np.random.randn(*edge_C.shape) * 0.01
-        
-        # 提取角点
-        corners = [
-            vertex,
-            curve_control[0],
-            curve_control[-1]
-        ]
-        
-        return {
-            'interior_points': interior_points,
-            'edge_points': [edge_A, edge_B, edge_C],
-            'corners': corners,
-            'vertex': vertex,
-            'curve_control': curve_control,
-            'partition_type': 'triangle'
-        }
-    
-    def _evaluate_bspline(self, control_points: np.ndarray, t: float) -> np.ndarray:
-        """
-        评估B样条曲线上的点
+        生成随机NURBS曲线
         Args:
-            control_points: 控制点数组
-            t: 参数值 [0, 1]
+            num_control_points: 控制点数量
+            degree: 曲线次数
+            straight: 是否生成较为平直的曲线
+        Returns:
+            控制点、权重、节点向量
+        """
+        if straight:
+            # 生成较为平直的曲线
+            # 创建一条基本直线
+            start_point = np.random.rand(3) * 2 - 1
+            end_point = np.random.rand(3) * 2 - 1
+            
+            # 生成控制点，大部分在直线上，小部分有轻微扰动
+            control_points = np.zeros((num_control_points, 3))
+            for i in range(num_control_points):
+                t = i / (num_control_points - 1)
+                # 基本直线
+                base_point = (1 - t) * start_point + t * end_point
+                # 添加轻微扰动
+                perturbation = np.random.rand(3) * 0.1 - 0.05
+                control_points[i] = base_point + perturbation
+        else:
+            # 生成随机控制点
+            control_points = np.random.rand(num_control_points, 3) * 2 - 1  # 范围 [-1, 1]
+        
+        # 生成随机权重（确保为正）
+        weights = np.random.rand(num_control_points) + 0.5  # 范围 [0.5, 1.5]
+        
+        # 生成节点向量
+        knot_vector = self._generate_knot_vector(num_control_points, degree)
+        
+        return control_points, weights, knot_vector
+    
+    def _generate_knot_vector(self, num_control_points, degree):
+        """
+        生成节点向量
+        Args:
+            num_control_points: 控制点数量
+            degree: 曲线次数
+        Returns:
+            节点向量
+        """
+        knot_count = num_control_points + degree + 1
+        knot_vector = np.zeros(knot_count)
+        
+        # 均匀节点向量
+        for i in range(knot_count):
+            if i < degree + 1:
+                knot_vector[i] = 0.0
+            elif i > knot_count - degree - 2:
+                knot_vector[i] = 1.0
+            else:
+                knot_vector[i] = (i - degree) / (knot_count - 2 * degree - 1)
+        
+        return knot_vector
+    
+    def generate_developable_surface(self, straight=False):
+        """
+        生成直纹面
+        Args:
+            straight: 是否生成较为平直的直纹面
+        Returns:
+            两条NURBS曲线的参数
+        """
+        # 生成两条NURBS曲线
+        curve0_ctrl, curve0_weights, curve0_knots = self.generate_nurbs_curve(straight=straight)
+        curve1_ctrl, curve1_weights, curve1_knots = self.generate_nurbs_curve(straight=straight)
+        
+        # 确保两条曲线的节点向量相同
+        curve1_knots = curve0_knots.copy()
+        
+        return {
+            'curve0': {
+                'control_points': curve0_ctrl,
+                'weights': curve0_weights,
+                'knot_vector': curve0_knots,
+                'degree': 3
+            },
+            'curve1': {
+                'control_points': curve1_ctrl,
+                'weights': curve1_weights,
+                'knot_vector': curve1_knots,
+                'degree': 3
+            }
+        }
+    
+    def generate_edge_points(self, surface, num_points_per_edge=64):
+        """
+        生成边缘点列
+        Args:
+            surface: 直纹面参数
+            num_points_per_edge: 每条边的点数
+        Returns:
+            边缘点列
+        """
+        edges = []
+        
+        # 生成四条边
+        for i in range(4):
+            edge_points = []
+            for t in np.linspace(0, 1, num_points_per_edge):
+                if i % 2 == 0:
+                    # 第一条曲线
+                    point = self._evaluate_nurbs_curve(surface['curve0'], t)
+                else:
+                    # 第二条曲线
+                    point = self._evaluate_nurbs_curve(surface['curve1'], t)
+                edge_points.append(point)
+            edges.append(np.array(edge_points))
+        
+        return edges
+    
+    def generate_interior_points(self, surface, num_points=1000):
+        """
+        生成内部点云
+        Args:
+            surface: 直纹面参数
+            num_points: 点云数量
+        Returns:
+            内部点云
+        """
+        points = []
+        
+        for _ in range(num_points):
+            u = np.random.rand()
+            v = np.random.rand()
+            
+            # 计算直纹面上的点
+            p1 = self._evaluate_nurbs_curve(surface['curve0'], u)
+            p2 = self._evaluate_nurbs_curve(surface['curve1'], u)
+            point = (1 - v) * p1 + v * p2
+            
+            points.append(point)
+        
+        return np.array(points)
+    
+    def _evaluate_nurbs_curve(self, curve, u):
+        """
+        评估NURBS曲线上的点
+        Args:
+            curve: NURBS曲线参数
+            u: 参数值
         Returns:
             曲线上的点
         """
-        n = len(control_points)
-        t = t * (n - 1)
-        k = int(np.floor(t))
-        if k >= n - 1:
-            k = n - 2
-        t_local = t - k
+        control_points = curve['control_points']
+        weights = curve['weights']
+        knot_vector = curve['knot_vector']
+        degree = curve['degree']
         
-        # 二次B样条基函数
-        if k == 0:
-            p0, p1, p2 = control_points[0], control_points[1], control_points[2]
-        elif k == n - 2:
-            p0, p1, p2 = control_points[-3], control_points[-2], control_points[-1]
+        n = len(control_points) - 1
+        numerator = np.zeros(3)
+        denominator = 0.0
+        
+        for i in range(n + 1):
+            basis = self._compute_basis_function(u, knot_vector, degree, i)
+            weighted_basis = basis * weights[i]
+            numerator += weighted_basis * control_points[i]
+            denominator += weighted_basis
+        
+        if denominator > 1e-8:
+            return numerator / denominator
         else:
-            p0, p1, p2 = control_points[k], control_points[k+1], control_points[k+2]
-        
-        # 二次B样条公式
-        result = (1 - t_local)**2 / 2 * p0 + \
-                 (1 - 2*t_local + t_local**2) * p1 + \
-                 t_local**2 / 2 * p2
-        
-        return result
+            return np.zeros(3)
     
-    def generate_dataset(self, num_quad: int = None, num_tri: int = None) -> List[Dict[str, Any]]:
+    def _compute_basis_function(self, u, knot_vector, degree, i):
+        """
+        计算B样条基函数
+        Args:
+            u: 参数值
+            knot_vector: 节点向量
+            degree: 曲线次数
+            i: 基函数索引
+        Returns:
+            基函数值
+        """
+        if degree == 0:
+            return 1.0 if knot_vector[i] <= u < knot_vector[i+1] else 0.0
+        else:
+            denominator1 = knot_vector[i+degree] - knot_vector[i]
+            denominator2 = knot_vector[i+degree+1] - knot_vector[i+1]
+            
+            term1 = 0.0
+            if denominator1 > 1e-8:
+                term1 = (u - knot_vector[i]) / denominator1 * self._compute_basis_function(u, knot_vector, degree-1, i)
+            
+            term2 = 0.0
+            if denominator2 > 1e-8:
+                term2 = (knot_vector[i+degree+1] - u) / denominator2 * self._compute_basis_function(u, knot_vector, degree-1, i+1)
+            
+            return term1 + term2
+    
+    def generate_sample(self, straight_ratio=0.5):
+        """
+        生成一个训练样本
+        Args:
+            straight_ratio: 生成平直直纹面的比例
+        Returns:
+            样本字典
+        """
+        # 随机决定是否生成平直直纹面
+        straight = np.random.rand() < straight_ratio
+        
+        # 生成直纹面
+        surface = self.generate_developable_surface(straight=straight)
+        
+        # 生成边缘点列
+        edges = self.generate_edge_points(surface)
+        
+        # 生成内部点云
+        point_cloud = self.generate_interior_points(surface)
+        
+        # 提取NURBS参数
+        curve0 = surface['curve0']
+        curve1 = surface['curve1']
+        
+        # 构建NURBS参数向量
+        nurbs_params = []
+        
+        # 曲线0参数
+        nurbs_params.extend(curve0['control_points'].flatten())
+        nurbs_params.extend(curve0['weights'])
+        nurbs_params.extend(curve0['knot_vector'])
+        nurbs_params.append(curve0['degree'])
+        
+        # 曲线1参数
+        nurbs_params.extend(curve1['control_points'].flatten())
+        nurbs_params.extend(curve1['weights'])
+        nurbs_params.extend(curve1['knot_vector'])
+        nurbs_params.append(curve1['degree'])
+        
+        nurbs_params = np.array(nurbs_params)
+        
+        return {
+            'edges': np.array(edges),
+            'point_cloud': point_cloud,
+            'nurbs_params': nurbs_params,
+            'surface': surface,
+            'is_straight': straight
+        }
+    
+    def generate_dataset(self, num_train=1000, num_test=200, straight_ratio=0.5):
         """
         生成数据集
         Args:
-            num_quad: 四边形样本数量
-            num_tri: 三角形样本数量
-        Returns:
-            样本列表
+            num_train: 训练样本数量
+            num_test: 测试样本数量
+            straight_ratio: 生成平直直纹面的比例
         """
-        if num_quad is None:
-            num_quad = self.num_samples // 2
-        if num_tri is None:
-            num_tri = self.num_samples // 2
+        print(f"生成训练数据集...")
+        train_data = []
+        for i in range(num_train):
+            if (i + 1) % 100 == 0:
+                print(f"生成训练样本 {i+1}/{num_train}")
+            sample = self.generate_sample(straight_ratio=straight_ratio)
+            train_data.append(sample)
         
-        dataset = []
+        print(f"生成测试数据集...")
+        test_data = []
+        for i in range(num_test):
+            if (i + 1) % 50 == 0:
+                print(f"生成测试样本 {i+1}/{num_test}")
+            sample = self.generate_sample(straight_ratio=straight_ratio)
+            test_data.append(sample)
         
-        # 生成四边形样本
-        for i in range(num_quad):
-            sample = self.generate_quadrilateral_sample()
-            # 数据增强
-            sample = self._augment_sample(sample)
-            dataset.append(sample)
+        # 保存数据
+        train_path = os.path.join(self.train_dir, 'train_dataset.npy')
+        test_path = os.path.join(self.test_dir, 'test_dataset.npy')
         
-        # 生成三角形样本
-        for i in range(num_tri):
-            sample = self.generate_triangle_sample()
-            # 数据增强
-            sample = self._augment_sample(sample)
-            dataset.append(sample)
+        np.save(train_path, train_data)
+        np.save(test_path, test_data)
         
-        return dataset
-    
-    def _augment_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        数据增强：随机旋转、平移、缩放
-        """
-        # 随机旋转
-        angle = np.random.uniform(0, 2 * np.pi)
-        axis = np.random.randn(3)
-        axis = axis / np.linalg.norm(axis)
-        
-        rotation_matrix = self._rotation_matrix(axis, angle)
-        
-        # 应用旋转
-        sample['interior_points'] = sample['interior_points'] @ rotation_matrix.T
-        
-        for i, edge in enumerate(sample['edge_points']):
-            sample['edge_points'][i] = edge @ rotation_matrix.T
-        
-        for i, corner in enumerate(sample['corners']):
-            sample['corners'][i] = corner @ rotation_matrix.T
-        
-        if 'vertex' in sample:
-            sample['vertex'] = sample['vertex'] @ rotation_matrix.T
-        
-        if 'curve_A_control' in sample:
-            sample['curve_A_control'] = sample['curve_A_control'] @ rotation_matrix.T
-        
-        if 'curve_B_control' in sample:
-            sample['curve_B_control'] = sample['curve_B_control'] @ rotation_matrix.T
-        
-        if 'curve_control' in sample:
-            sample['curve_control'] = sample['curve_control'] @ rotation_matrix.T
-        
-        # 随机平移
-        translation = np.random.randn(3) * 0.2
-        sample['interior_points'] = sample['interior_points'] + translation
-        
-        for i, edge in enumerate(sample['edge_points']):
-            sample['edge_points'][i] = edge + translation
-        
-        for i, corner in enumerate(sample['corners']):
-            sample['corners'][i] = corner + translation
-        
-        if 'vertex' in sample:
-            sample['vertex'] = sample['vertex'] + translation
-        
-        if 'curve_A_control' in sample:
-            sample['curve_A_control'] = sample['curve_A_control'] + translation
-        
-        if 'curve_B_control' in sample:
-            sample['curve_B_control'] = sample['curve_B_control'] + translation
-        
-        if 'curve_control' in sample:
-            sample['curve_control'] = sample['curve_control'] + translation
-        
-        # 随机缩放
-        scale = np.random.uniform(0.8, 1.2)
-        sample['interior_points'] = sample['interior_points'] * scale
-        
-        for i, edge in enumerate(sample['edge_points']):
-            sample['edge_points'][i] = edge * scale
-        
-        for i, corner in enumerate(sample['corners']):
-            sample['corners'][i] = corner * scale
-        
-        if 'vertex' in sample:
-            sample['vertex'] = sample['vertex'] * scale
-        
-        if 'curve_A_control' in sample:
-            sample['curve_A_control'] = sample['curve_A_control'] * scale
-        
-        if 'curve_B_control' in sample:
-            sample['curve_B_control'] = sample['curve_B_control'] * scale
-        
-        if 'curve_control' in sample:
-            sample['curve_control'] = sample['curve_control'] * scale
-        
-        return sample
-    
-    def _rotation_matrix(self, axis: np.ndarray, angle: float) -> np.ndarray:
-        """
-        生成绕任意轴旋转的旋转矩阵
-        """
-        axis = axis / np.linalg.norm(axis)
-        c = np.cos(angle)
-        s = np.sin(angle)
-        t = 1 - c
-        
-        x, y, z = axis
-        
-        return np.array([
-            [t*x*x + c,   t*x*y - z*s, t*x*z + y*s],
-            [t*x*y + z*s, t*y*y + c,   t*y*z - x*s],
-            [t*x*z - y*s, t*y*z + x*s, t*z*z + c]
-        ])
-    
-    def normalize_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        归一化样本：将点云平移至以角点包围盒中心，并缩放至单位立方体
-        """
-        # 计算所有点的包围盒
-        all_points = [sample['interior_points']]
-        all_points.extend(sample['edge_points'])
-        
-        min_coords = np.min(np.vstack([np.min(ep, axis=0) for ep in all_points]), axis=0)
-        max_coords = np.max(np.vstack([np.max(ep, axis=0) for ep in all_points]), axis=0)
-        
-        center = (min_coords + max_coords) / 2
-        scale = np.max(max_coords - min_coords) / 2
-        
-        # 归一化
-        normalized = sample.copy()
-        
-        normalized['interior_points'] = (sample['interior_points'] - center) / scale
-        
-        normalized['edge_points'] = []
-        for edge in sample['edge_points']:
-            normalized['edge_points'].append((edge - center) / scale)
-        
-        normalized['corners'] = []
-        for corner in sample['corners']:
-            normalized['corners'].append((corner - center) / scale)
-        
-        if 'vertex' in sample:
-            normalized['vertex'] = (sample['vertex'] - center) / scale
-        
-        if 'curve_A_control' in sample:
-            normalized['curve_A_control'] = (sample['curve_A_control'] - center) / scale
-        
-        if 'curve_B_control' in sample:
-            normalized['curve_B_control'] = (sample['curve_B_control'] - center) / scale
-        
-        if 'curve_control' in sample:
-            normalized['curve_control'] = (sample['curve_control'] - center) / scale
-        
-        return normalized
+        print(f"训练数据保存到: {train_path}")
+        print(f"测试数据保存到: {test_path}")
+        print(f"训练样本数量: {len(train_data)}")
+        print(f"测试样本数量: {len(test_data)}")
+        print(f"平直直纹面比例: {straight_ratio}")
 
 
-def save_dataset(dataset: List[Dict[str, Any]], filepath: str):
-    """
-    保存数据集到文件
-    """
-    np.save(filepath, dataset)
-    print(f"数据集已保存到 {filepath}")
-
-
-def load_dataset(filepath: str) -> List[Dict[str, Any]]:
-    """
-    从文件加载数据集
-    """
-    dataset = np.load(filepath, allow_pickle=True)
-    print(f"数据集已从 {filepath} 加载，共 {len(dataset)} 个样本")
-    return dataset
-
-
-if __name__ == "__main__":
-    # 生成训练数据
-    generator = DevelopableSurfaceDataGenerator(M=16, num_samples=1000)
-    train_dataset = generator.generate_dataset(num_quad=500, num_tri=500)
+if __name__ == '__main__':
+    # 创建数据生成器
+    generator = NURBSSurfaceDataGenerator()
     
-    # 归一化
-    train_dataset = [generator.normalize_sample(sample) for sample in train_dataset]
-    
-    # 保存
-    save_dataset(train_dataset, "data/neural/train_dataset.npy")
-    
-    # 生成测试数据
-    test_generator = DevelopableSurfaceDataGenerator(M=16, num_samples=200)
-    test_dataset = test_generator.generate_dataset(num_quad=100, num_tri=100)
-    
-    # 归一化
-    test_dataset = [test_generator.normalize_sample(sample) for sample in test_dataset]
-    
-    # 保存
-    save_dataset(test_dataset, "data/neural/test_dataset.npy")
-    
-    print("数据生成完成！")
+    # 生成数据集
+    generator.generate_dataset(num_train=1000, num_test=200)

@@ -78,7 +78,7 @@ class FiveAxisMachiningSystem:
                 'spindle_speed': 8000.0
             },
             'algorithm': {
-                'partition_resolution': 0.05,  # 分区分辨率参数，降低以减少分区数量
+                'partition_resolution': 0.5,  # 分区分辨率参数，增大以减少分区数量
                 'smoothing_lambda': 0.5,
                 'max_iterations': 100,
                 'tolerance': 1e-4,
@@ -168,12 +168,51 @@ class FiveAxisMachiningSystem:
                 raise ValueError(f"文件不存在: {input_path}")
 
             print(f"加载网格: {input_path}")
-            # 使用Open3D加载网格
+            
+            # 尝试使用Open3D加载网格
             self.mesh = o3d.io.read_triangle_mesh(input_path, True)
             
             # 检查网格是否有效
-            if len(self.mesh.vertices) == 0 or len(self.mesh.triangles) == 0:
-                raise ValueError("加载的网格无效")
+            if len(self.mesh.vertices) == 0:
+                print("Open3D加载失败，尝试手动解析OBJ文件...")
+                # 手动解析OBJ文件
+                vertices = []
+                with open(input_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('v '):
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                x = float(parts[1])
+                                y = float(parts[2])
+                                z = float(parts[3])
+                                vertices.append([x, y, z])
+                
+                if len(vertices) == 0:
+                    raise ValueError("加载的网格无效，没有顶点数据")
+                
+                print(f"手动解析完成，找到 {len(vertices)} 个顶点")
+                
+                # 创建点云
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(vertices)
+                # 计算法线
+                pcd.estimate_normals()
+                pcd.orient_normals_consistent_tangent_plane(10)
+                # 使用凸包算法生成面数据（基于Delaunay三角剖分）
+                self.mesh, _ = pcd.compute_convex_hull()
+                print(f"Delaunay三角剖分完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+            elif len(self.mesh.triangles) == 0:
+                print("网格没有面数据，使用Delaunay三角剖分生成面数据...")
+                # 转换为点云
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = self.mesh.vertices
+                # 计算法线
+                pcd.estimate_normals()
+                pcd.orient_normals_consistent_tangent_plane(10)
+                # 使用凸包算法生成面数据（基于Delaunay三角剖分）
+                self.mesh, _ = pcd.compute_convex_hull()
+                print(f"Delaunay三角剖分完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
 
             # 计算法线
             print("计算网格法线...")
@@ -287,19 +326,20 @@ class FiveAxisMachiningSystem:
                     pcd.orient_normals_consistent_tangent_plane(10)
                 
                 # 使用BPA重建
-                radii = [0.005, 0.01, 0.02, 0.04]
-                try:
-                    # 尝试获取密度信息
-                    self.mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                        pcd, o3d.utility.DoubleVector(radii)
-                    )
-                    print(f"BPA网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
-                except ValueError:
-                    # 如果只返回一个对象
-                    self.mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                        pcd, o3d.utility.DoubleVector(radii)
-                    )
-                    print(f"BPA网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+                # 调整半径参数以适应球体曲面
+                radii = [0.5, 1.0, 1.5, 2.0]  # 增大半径参数
+                # 只获取一个返回值
+                self.mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                    pcd, o3d.utility.DoubleVector(radii)
+                )
+                print(f"BPA网格重建完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
+                
+                # 如果BPA失败（没有生成三角形），使用Delaunay三角剖分作为备用
+                if len(self.mesh.triangles) == 0:
+                    print("BPA失败，使用Delaunay三角剖分作为备用...")
+                    # 使用凸包算法生成面数据（基于Delaunay三角剖分）
+                    self.mesh, _ = pcd.compute_convex_hull()
+                    print(f"Delaunay三角剖分完成: {len(self.mesh.vertices)} 个顶点, {len(self.mesh.triangles)} 个三角形")
             elif mesh_algorithm == "poisson":
                 # Poisson Reconstruction
                 print("使用Poisson Reconstruction重建网格...")
@@ -596,14 +636,20 @@ class FiveAxisMachiningSystem:
         with open(metrics_file, 'w') as f:
             json.dump(self.results['metrics'], f, indent=2)
     
-    def fit_developable_surfaces(self, error_threshold: float = 0.01):
+    def fit_developable_surfaces(self, error_threshold: float = 0.01, use_neural: bool = True, neural_model_path: str = None):
         """拟合直纹面"""
         if not self.mesh_processor or self.results['partition_labels'] is None:
             raise ValueError("请先加载网格和运行表面分区")
 
         print("拟合直纹面...")
+        print(f"使用神经网络: {use_neural}")
 
-        self.developable_fitter = DevelopableSurfaceFitter(self.mesh_processor)
+        # 创建直纹面拟合器，启用神经网络
+        self.developable_fitter = DevelopableSurfaceFitter(
+            self.mesh_processor,
+            use_neural=use_neural,
+            neural_model_path=neural_model_path
+        )
 
         # 获取边缘中点
         edge_midpoints = self.results.get('edge_midpoints', np.array([]))
@@ -613,6 +659,7 @@ class FiveAxisMachiningSystem:
 
         self.results['developable_surfaces'] = developable_surfaces
         self.results['metrics']['num_developable_surfaces'] = len(developable_surfaces)
+        self.results['metrics']['use_neural'] = use_neural
 
         print(f"直纹面拟合完成: {len(developable_surfaces)} 个直纹面")
 
@@ -759,7 +806,7 @@ class FiveAxisMachiningSystem:
                     json.dump({'edges': unique_edges}, f, indent=2)
                 print(f"分区边缘数据已保存: {len(unique_edges)} 条边缘")
 
-    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01, uniform_sampling=False):
+    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01, uniform_sampling=False, use_neural=True, neural_model_path=None):
         """运行完整处理流程"""
         print("=" * 50)
         print("五轴加工路径规划系统")
@@ -780,23 +827,28 @@ class FiveAxisMachiningSystem:
 
             # 3. 表面分区
             print("\n3. 表面分区...")
-            partition_labels = self.load_intermediate_result("partition_labels")
-            edge_midpoints = self.load_intermediate_result("edge_midpoints")
-            if partition_labels is not None and edge_midpoints is not None:
-                self.results['partition_labels'] = partition_labels
-                self.results['edge_midpoints'] = edge_midpoints
-                print("跳过分区步骤，使用已加载的分区结果")
-            else:
-                self.run_partitioning()
-                if self.results['partition_labels'] is not None and self.results['edge_midpoints'] is not None:
-                    self.save_intermediate_result("partition_labels", self.results['partition_labels'])
-                    self.save_intermediate_result("edge_midpoints", self.results['edge_midpoints'])
-                    self.save_metrics()
+            # 强制重新运行分区算法，不使用已加载的分区结果
+            # partition_labels = self.load_intermediate_result("partition_labels")
+            # edge_midpoints = self.load_intermediate_result("edge_midpoints")
+            # if partition_labels is not None and edge_midpoints is not None:
+            #     self.results['partition_labels'] = partition_labels
+            #     self.results['edge_midpoints'] = edge_midpoints
+            #     print("跳过分区步骤，使用已加载的分区结果")
+            # else:
+            self.run_partitioning()
+            if self.results['partition_labels'] is not None and self.results['edge_midpoints'] is not None:
+                self.save_intermediate_result("partition_labels", self.results['partition_labels'])
+                self.save_intermediate_result("edge_midpoints", self.results['edge_midpoints'])
+                self.save_metrics()
 
             # 4. 直纹面拟合（如果开启）
             if developable_fit:
                 print("\n4. 拟合直纹面...")
-                self.fit_developable_surfaces(developable_error_threshold)
+                self.fit_developable_surfaces(
+                    developable_error_threshold,
+                    use_neural=use_neural,
+                    neural_model_path=neural_model_path
+                )
             else:
                 # 5. 生成工具方向场
                 print("\n4. 生成工具方向场...")
@@ -866,6 +918,178 @@ class FiveAxisMachiningSystem:
             traceback.print_exc()
             # 保存已有的结果
             self.save_metrics()
+            return False
+    
+    def train_neural_network(self, train_data_path, val_data_path, epochs=100, batch_size=32, learning_rate=1e-4, checkpoint_dir='data/neural/checkpoints'):
+        """训练神经网络"""
+        print("=" * 50)
+        print("训练神经网络")
+        print("=" * 50)
+        
+        try:
+            # 导入必要的模块
+            import torch
+            import torch.nn as nn
+            import torch.optim as optim
+            from torch.utils.data import Dataset, DataLoader
+            import os
+            import sys
+            
+            # 添加项目根目录到Python路径
+            sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+            
+            # 导入模型
+            from core.edgePointToNURBSSurfaceNet import EdgePointToNURBSSurfaceNet
+            
+            class NURBSSurfaceDataset(Dataset):
+                """
+                NURBS直纹面训练数据集
+                """
+                
+                def __init__(self, data_path):
+                    """
+                    初始化数据集
+                    Args:
+                        data_path: 数据文件路径
+                    """
+                    self.data = np.load(data_path, allow_pickle=True)
+                    
+                def __len__(self):
+                    return len(self.data)
+                
+                def __getitem__(self, idx):
+                    """
+                    获取数据项
+                    Args:
+                        idx: 数据索引
+                    Returns:
+                        边缘点列、内部点云、NURBS参数
+                    """
+                    item = self.data[idx]
+                    
+                    # 提取数据
+                    edges = item['edges']  # (4, 64, 3)
+                    point_cloud = item['point_cloud']  # (1000, 3)
+                    nurbs_params = item['nurbs_params']  # 包含两条曲线的参数
+                    
+                    # 转换为张量
+                    edges = torch.tensor(edges, dtype=torch.float32)
+                    point_cloud = torch.tensor(point_cloud, dtype=torch.float32)
+                    nurbs_params = torch.tensor(nurbs_params, dtype=torch.float32)
+                    
+                    return edges, point_cloud, nurbs_params
+            
+            # 创建检查点目录
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir)
+            
+            # 确定设备
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            print(f'使用设备: {device}')
+            
+            # 创建数据集
+            train_dataset = NURBSSurfaceDataset(train_data_path)
+            val_dataset = NURBSSurfaceDataset(val_data_path)
+            
+            # 创建数据加载器
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+            
+            # 创建模型
+            model = EdgePointToNURBSSurfaceNet(M=16, degree=3).to(device)
+            print(f'模型参数数量: {sum(p.numel() for p in model.parameters())}')
+            
+            # 定义损失函数
+            criterion = nn.MSELoss()
+            
+            # 定义优化器
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+            
+            # 学习率调度器
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
+            
+            # 最佳验证损失
+            best_val_loss = float('inf')
+            
+            for epoch in range(epochs):
+                # 训练模式
+                model.train()
+                train_loss = 0.0
+                
+                for batch_idx, (edges, point_cloud, targets) in enumerate(train_loader):
+                    # 移动数据到设备
+                    edges = edges.to(device)
+                    point_cloud = point_cloud.to(device)
+                    targets = targets.to(device)
+                    
+                    # 清零梯度
+                    optimizer.zero_grad()
+                    
+                    # 前向传播
+                    outputs = model(edges, point_cloud)
+                    
+                    # 计算损失
+                    loss = criterion(outputs, targets)
+                    
+                    # 反向传播
+                    loss.backward()
+                    
+                    # 更新参数
+                    optimizer.step()
+                    
+                    # 累积损失
+                    train_loss += loss.item()
+                    
+                    # 打印进度
+                    if (batch_idx + 1) % 100 == 0:
+                        print(f'Epoch [{epoch+1}/{epochs}], Batch [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
+                
+                # 计算平均训练损失
+                avg_train_loss = train_loss / len(train_loader)
+                
+                # 验证模式
+                model.eval()
+                val_loss = 0.0
+                
+                with torch.no_grad():
+                    for edges, point_cloud, targets in val_loader:
+                        # 移动数据到设备
+                        edges = edges.to(device)
+                        point_cloud = point_cloud.to(device)
+                        targets = targets.to(device)
+                        
+                        # 前向传播
+                        outputs = model(edges, point_cloud)
+                        
+                        # 计算损失
+                        loss = criterion(outputs, targets)
+                        
+                        # 累积损失
+                        val_loss += loss.item()
+                
+                # 计算平均验证损失
+                avg_val_loss = val_loss / len(val_loader)
+                
+                # 更新学习率
+                scheduler.step(avg_val_loss)
+                
+                # 打印 epoch 结果
+                print(f'Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+                
+                # 保存最佳模型
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    checkpoint_path = os.path.join(checkpoint_dir, 'best_nurbs_model.pth')
+                    torch.save(model.state_dict(), checkpoint_path)
+                    print(f'最佳模型已保存到: {checkpoint_path}')
+            
+            print(f'训练完成！最佳验证损失: {best_val_loss:.4f}')
+            return True
+            
+        except Exception as e:
+            print(f"训练过程中出错: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def run_partition_only(self, input_path, skip_visualization=False, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None):
@@ -1064,17 +1288,24 @@ if __name__ == "__main__":
     
     # 解析命令行参数
     partition_only = False
+    train_neural = False
     mesh_algorithm = "delaunay_cocone"  # 默认使用Delaunay + Cocone算法
     surface_func = None
     surface_params = {}
     input_path = None
+    train_data_path = None
+    val_data_path = None
     developable_fit = False
     developable_error_threshold = 0.01
     uniform_sampling = False
+    use_neural = True  # 默认使用神经网络
+    neural_model_path = None  # 默认使用自动查找的模型路径
     
     for arg in sys.argv[1:]:
         if arg == "--partition-only":
             partition_only = True
+        elif arg == "--train-neural":
+            train_neural = True
         elif arg.startswith("--mesh-algorithm="):
             mesh_algorithm = arg.split("=")[1]
         elif arg.startswith("--surface="):
@@ -1083,98 +1314,215 @@ if __name__ == "__main__":
             surface_params['resolution'] = int(arg.split("=")[1])
         elif arg.startswith("--path="):
             input_path = arg.split("=")[1]
+        elif arg.startswith("--train-data="):
+            train_data_path = arg.split("=")[1]
+        elif arg.startswith("--val-data="):
+            val_data_path = arg.split("=")[1]
         elif arg == "--developable-fit":
             developable_fit = True
         elif arg.startswith("--developable-error="):
             developable_error_threshold = float(arg.split("=")[1])
         elif arg == "--uniform-sampling":
             uniform_sampling = True
+        elif arg == "--use-neural":
+            use_neural = True
+        elif arg == "--no-neural":
+            use_neural = False
+        elif arg.startswith("--neural-model-path="):
+            neural_model_path = arg.split("=")[1]
     
-    # 验证参数组合
-    # 1. --path只能与--mesh-algorithm=obj共存
-    if input_path and mesh_algorithm != "obj":
-        print("错误: --path参数只能与--mesh-algorithm=obj共存")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        sys.exit(1)
-    
-    # 2. --surface只能与--mesh-algorithm=算法名称（非obj）共存
-    if surface_func and mesh_algorithm == "obj":
-        print("错误: --surface参数不能与--mesh-algorithm=obj共存")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        sys.exit(1)
-    
-    # 3. 当--mesh-algorithm=obj时，必须指定--path
-    if mesh_algorithm == "obj" and not input_path:
-        print("错误: 当--mesh-algorithm=obj时，必须指定--path参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        sys.exit(1)
-    
-    # 4. 当使用--surface时，不需要指定--path
-    if surface_func and input_path:
-        print("错误: 当使用--surface参数时，不需要指定--path参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        sys.exit(1)
-    
-    # 5. 当既没有--path也没有--surface时，使用默认曲面
-    if not input_path and not surface_func:
-        print("错误: 必须指定--path参数或--surface参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--developable-fit] [--developable-error=<float>] [--uniform-sampling]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --uniform-sampling: 使用均匀采样生成网格，确保各向对称")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --developable-fit: 开启直纹面逼近功能，不计算刀具路径")
-        print("  --developable-error: 直纹面逼近误差阈值，默认值: 0.01")
-        # 示例用法
-        print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj")
-        print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only")
-        print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --resolution=50")
-        print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --developable-error=0.005")
-        print("说明:")
-        print("  1. 当 --mesh-algorithm=obj 时，必须指定--path参数，直接使用OBJ文件，跳过采样步骤")
-        print("  2. 当指定 --surface 参数时，会根据曲面函数生成网格，不能与--path参数同时使用")
-        print("  3. 曲面方程直接在代码中定义，无需通过命令行传入")
-        print("  4. 有默认值的参数若没有指定，采用默认值")
-        print("  5. 若--mesh-algorithm为obj才采用.obj文件，跳过采样步骤")
-        print("  6. 若为其他算法名称则采样构造网格，随后再进行其他步骤")
-        print("  7. 若指定--developable-fit，则开启直纹面逼近功能，不计算刀具路径")
-        print("  8. 若计算刀具路径，则不逼近直纹面")
-        sys.exit(1)
-    
+    # 初始化系统
     system = FiveAxisMachiningSystem()
     
-    # 检查是否指定了只运行分区
-    if partition_only:
+    # 运行模式
+    if train_neural:
+        # 训练神经网络
+        if not train_data_path or not val_data_path:
+            print("错误: 训练神经网络时必须提供训练数据和验证数据路径")
+            print("用法: python main.py --train-neural --train-data=<path> --val-data=<path>")
+            sys.exit(1)
+        
+        success = system.train_neural_network(
+            train_data_path=train_data_path,
+            val_data_path=val_data_path
+        )
+    elif partition_only:
+        # 只运行分区
+        # 验证参数组合
+        # 1. --path只能与--mesh-algorithm=obj共存
+        if input_path and mesh_algorithm != "obj":
+            print("错误: --path参数只能与--mesh-algorithm=obj共存")
+            # 显示用法说明
+            print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 2. --surface只能与--mesh-algorithm=算法名称（非obj）共存
+        if surface_func and mesh_algorithm == "obj":
+            print("错误: --surface参数不能与--mesh-algorithm=obj共存")
+            # 显示用法说明
+            print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 3. 当--mesh-algorithm=obj时，必须指定--path
+        if mesh_algorithm == "obj" and not input_path:
+            print("错误: 当--mesh-algorithm=obj时，必须指定--path参数")
+            # 显示用法说明
+            print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 4. 当使用--surface时，不需要指定--path
+        if surface_func and input_path:
+            print("错误: 当使用--surface参数时，不需要指定--path参数")
+            # 显示用法说明
+            print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 5. 当既没有--path也没有--surface时，使用默认曲面
+        if not input_path and not surface_func:
+            print("错误: 必须指定--path参数或--surface参数")
+            # 显示用法说明
+            print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--developable-fit] [--developable-error=<float>] [--uniform-sampling] [--use-neural|--no-neural] [--neural-model-path=<path>]")
+            print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --uniform-sampling: 使用均匀采样生成网格，确保各向对称")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            print("  --developable-fit: 开启直纹面逼近功能，不计算刀具路径")
+            print("  --developable-error: 直纹面逼近误差阈值，默认值: 0.01")
+            print("  --use-neural: 使用神经网络进行直纹面拟合（默认）")
+            print("  --no-neural: 不使用神经网络，使用传统方法进行直纹面拟合")
+            print("  --neural-model-path: 神经网络模型路径，默认自动查找")
+            # 示例用法
+            print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj")
+            print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only")
+            print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --resolution=50")
+            print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --developable-error=0.005")
+            print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --use-neural")
+            print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --developable-fit --neural-model-path=data/neural/checkpoints/best_model.pth")
+            print("说明:")
+            print("  1. 当 --mesh-algorithm=obj 时，必须指定--path参数，直接使用OBJ文件，跳过采样步骤")
+            print("  2. 当指定 --surface 参数时，会根据曲面函数生成网格，不能与--path参数同时使用")
+            print("  3. 曲面方程直接在代码中定义，无需通过命令行传入")
+            print("  4. 有默认值的参数若没有指定，采用默认值")
+            print("  5. 若--mesh-algorithm为obj才采用.obj文件，跳过采样步骤")
+            print("  6. 若为其他算法名称则采样构造网格，随后再进行其他步骤")
+            print("  7. 若指定--developable-fit，则开启直纹面逼近功能，不计算刀具路径")
+            print("  8. 若计算刀具路径，则不逼近直纹面")
+            sys.exit(1)
+        
         success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
     else:
-        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, developable_fit=developable_fit, developable_error_threshold=developable_error_threshold, uniform_sampling=uniform_sampling)
+        # 运行完整流程
+        # 验证参数组合
+        # 1. --path只能与--mesh-algorithm=obj共存
+        if input_path and mesh_algorithm != "obj":
+            print("错误: --path参数只能与--mesh-algorithm=obj共存")
+            # 显示用法说明
+            print("用法: python main.py [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 2. --surface只能与--mesh-algorithm=算法名称（非obj）共存
+        if surface_func and mesh_algorithm == "obj":
+            print("错误: --surface参数不能与--mesh-algorithm=obj共存")
+            # 显示用法说明
+            print("用法: python main.py [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 3. 当--mesh-algorithm=obj时，必须指定--path
+        if mesh_algorithm == "obj" and not input_path:
+            print("错误: 当--mesh-algorithm=obj时，必须指定--path参数")
+            # 显示用法说明
+            print("用法: python main.py [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 4. 当使用--surface时，不需要指定--path
+        if surface_func and input_path:
+            print("错误: 当使用--surface参数时，不需要指定--path参数")
+            # 显示用法说明
+            print("用法: python main.py [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>]")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            sys.exit(1)
+        
+        # 5. 当既没有--path也没有--surface时，使用默认曲面
+        if not input_path and not surface_func:
+            print("错误: 必须指定--path参数或--surface参数")
+            # 显示用法说明
+            print("用法: python main.py [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--developable-fit] [--developable-error=<float>] [--uniform-sampling] [--use-neural|--no-neural] [--neural-model-path=<path>]")
+            print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
+            print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
+            print("  --resolution: 曲面采样分辨率，默认值: 50")
+            print("  --uniform-sampling: 使用均匀采样生成网格，确保各向对称")
+            print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
+            print("  --developable-fit: 开启直纹面逼近功能，不计算刀具路径")
+            print("  --developable-error: 直纹面逼近误差阈值，默认值: 0.01")
+            print("  --use-neural: 使用神经网络进行直纹面拟合（默认）")
+            print("  --no-neural: 不使用神经网络，使用传统方法进行直纹面拟合")
+            print("  --neural-model-path: 神经网络模型路径，默认自动查找")
+            # 示例用法
+            print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj")
+            print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only")
+            print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --resolution=50")
+            print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --developable-error=0.005")
+            print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --use-neural")
+            print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --developable-fit --neural-model-path=data/neural/checkpoints/best_model.pth")
+            print("说明:")
+            print("  1. 当 --mesh-algorithm=obj 时，必须指定--path参数，直接使用OBJ文件，跳过采样步骤")
+            print("  2. 当指定 --surface 参数时，会根据曲面函数生成网格，不能与--path参数同时使用")
+            print("  3. 曲面方程直接在代码中定义，无需通过命令行传入")
+            print("  4. 有默认值的参数若没有指定，采用默认值")
+            print("  5. 若--mesh-algorithm为obj才采用.obj文件，跳过采样步骤")
+            print("  6. 若为其他算法名称则采样构造网格，随后再进行其他步骤")
+            print("  7. 若指定--developable-fit，则开启直纹面逼近功能，不计算刀具路径")
+            print("  8. 若计算刀具路径，则不逼近直纹面")
+            sys.exit(1)
+        
+        success = system.run_full_pipeline(
+            input_path, 
+            mesh_algorithm=mesh_algorithm, 
+            surface_func=surface_func, 
+            surface_params=surface_params, 
+            developable_fit=developable_fit, 
+            developable_error_threshold=developable_error_threshold, 
+            uniform_sampling=uniform_sampling,
+            use_neural=use_neural,
+            neural_model_path=neural_model_path
+        )
     
     if success:
         print("处理完成!")

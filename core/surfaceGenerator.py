@@ -391,7 +391,7 @@ class SurfaceGenerator:
         else:
             return np.array([0, 0, 1])
     
-    def generate_sphere(self, radius=1.0, resolution=50, output_path="sphere.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0, uniform_density=True, uniform_sampling=False):
+    def generate_sphere(self, radius=1.0, resolution=50, output_path="sphere.obj", density_factor=2.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0, uniform_density=True, uniform_sampling=False, visualize=True):
         """
         生成球体的OBJ文件
         
@@ -404,6 +404,7 @@ class SurfaceGenerator:
             point_cloud_downsample: 点云下采样因子，0.0表示不采样
             uniform_density: 是否使用均匀密度分布
             uniform_sampling: 是否使用均匀采样生成网格
+            visualize: 是否可视化生成的网格
             
         Returns:
             str: 生成的OBJ文件路径
@@ -411,7 +412,7 @@ class SurfaceGenerator:
         print(f"generate_sphere called with uniform_sampling={uniform_sampling}")
         if uniform_sampling:
             print(f"Calling generate_uniform_sphere with output_path={output_path}")
-            return self.generate_uniform_sphere(radius, resolution, output_path, density_factor, visualize_as_point_cloud, point_cloud_downsample)
+            return self.generate_uniform_sphere(radius, resolution, output_path, density_factor, visualize_as_point_cloud, point_cloud_downsample, visualize)
         else:
             def sphere_func(u, v):
                 # 参数化球体
@@ -438,9 +439,9 @@ class SurfaceGenerator:
                 point_cloud_downsample=point_cloud_downsample
             )
     
-    def generate_uniform_sphere(self, radius=1.0, resolution=50, output_path="uniform_sphere.obj", density_factor=1.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0):
+    def generate_uniform_sphere(self, radius=1.0, resolution=50, output_path="uniform_sphere.obj", density_factor=1.0, visualize_as_point_cloud=False, point_cloud_downsample=0.0, visualize=True):
         """
-        生成均匀采样的球体网格，确保各向对称，每个网格单元为正方形
+        生成均匀采样的球体网格，使用立方体投影法生成正方形网格
         
         Args:
             radius: 球体半径
@@ -449,64 +450,190 @@ class SurfaceGenerator:
             density_factor: 密度调节系数
             visualize_as_point_cloud: 是否以点云形式可视化
             point_cloud_downsample: 点云下采样因子，0.0表示不采样
+            visualize: 是否可视化生成的网格
             
         Returns:
             str: 生成的OBJ文件路径
         """
         print(f"生成均匀采样的球体网格，分辨率: {resolution}")
         
-        # 生成顶点
+        # 立方体投影法生成正方形网格
+        
+        # 生成立方体表面的点
         vertices = []
         faces = []
         
-        # 计算纬度和经度的步长
-        # 为了保证各向对称，使用相同的分辨率
-        num_lat = resolution
-        num_lon = resolution
+        # 计算每个面的分辨率
+        face_res = resolution
         
         # 生成顶点
-        for i in range(num_lat + 1):
-            # 计算纬度角度，使用sin(phi/2)来均匀分布点
-            phi = 2 * np.arcsin(np.sqrt(i / num_lat))
-            for j in range(num_lon + 1):
-                # 计算经度角度
-                theta = 2 * np.pi * j / num_lon
-                
-                # 计算顶点坐标
-                x = radius * np.sin(phi) * np.cos(theta)
-                y = radius * np.sin(phi) * np.sin(theta)
-                z = radius * np.cos(phi)
-                
-                vertices.append((x, y, z))
+        # 前面 (z=1)
+        front_vertices = []
+        for i in range(face_res + 1):
+            for j in range(face_res + 1):
+                x = -1 + 2 * i / face_res
+                y = -1 + 2 * j / face_res
+                z = 1
+                # 投影到球面上
+                norm = np.sqrt(x**2 + y**2 + z**2)
+                front_vertices.append((x/norm, y/norm, z/norm))
+        vertices.extend(front_vertices)
+        
+        # 后面 (z=-1)
+        back_vertices = []
+        for i in range(face_res + 1):
+            for j in range(face_res + 1):
+                x = -1 + 2 * i / face_res
+                y = -1 + 2 * j / face_res
+                z = -1
+                # 投影到球面上
+                norm = np.sqrt(x**2 + y**2 + z**2)
+                back_vertices.append((x/norm, y/norm, z/norm))
+        vertices.extend(back_vertices)
+        
+        # 右面 (x=1)
+        right_vertices = []
+        for j in range(face_res + 1):
+            for k in range(face_res + 1):
+                x = 1
+                y = -1 + 2 * j / face_res
+                z = -1 + 2 * k / face_res
+                # 投影到球面上
+                norm = np.sqrt(x**2 + y**2 + z**2)
+                right_vertices.append((x/norm, y/norm, z/norm))
+        vertices.extend(right_vertices)
+        
+        # 左面 (x=-1)
+        left_vertices = []
+        for j in range(face_res + 1):
+            for k in range(face_res + 1):
+                x = -1
+                y = -1 + 2 * j / face_res
+                z = -1 + 2 * k / face_res
+                # 投影到球面上
+                norm = np.sqrt(x**2 + y**2 + z**2)
+                left_vertices.append((x/norm, y/norm, z/norm))
+        vertices.extend(left_vertices)
+        
+        # 上面 (y=1)
+        top_vertices = []
+        for i in range(face_res + 1):
+            for k in range(face_res + 1):
+                x = -1 + 2 * i / face_res
+                y = 1
+                z = -1 + 2 * k / face_res
+                # 投影到球面上
+                norm = np.sqrt(x**2 + y**2 + z**2)
+                top_vertices.append((x/norm, y/norm, z/norm))
+        vertices.extend(top_vertices)
+        
+        # 下面 (y=-1)
+        bottom_vertices = []
+        for i in range(face_res + 1):
+            for k in range(face_res + 1):
+                x = -1 + 2 * i / face_res
+                y = -1
+                z = -1 + 2 * k / face_res
+                # 投影到球面上
+                norm = np.sqrt(x**2 + y**2 + z**2)
+                bottom_vertices.append((x/norm, y/norm, z/norm))
+        vertices.extend(bottom_vertices)
         
         # 生成面
-        for i in range(num_lat):
-            for j in range(num_lon):
-                # 计算四个顶点的索引
-                v0 = i * (num_lon + 1) + j
-                v1 = (i + 1) * (num_lon + 1) + j
-                v2 = (i + 1) * (num_lon + 1) + (j + 1)
-                v3 = i * (num_lon + 1) + (j + 1)
-                
-                # 添加两个三角形
-                faces.append((v0 + 1, v1 + 1, v2 + 1))  # OBJ文件从1开始计数
-                faces.append((v0 + 1, v2 + 1, v3 + 1))
+        # 前面 (z=1)
+        vertex_offset = 0
+        for i in range(face_res):
+            for j in range(face_res):
+                v0 = vertex_offset + i * (face_res + 1) + j
+                v1 = vertex_offset + (i + 1) * (face_res + 1) + j
+                v2 = vertex_offset + (i + 1) * (face_res + 1) + (j + 1)
+                v3 = vertex_offset + i * (face_res + 1) + (j + 1)
+                # 确保面的法线方向一致（逆时针顺序）
+                faces.append((v0, v1, v2))
+                faces.append((v0, v2, v3))
+        vertex_offset += (face_res + 1) * (face_res + 1)
+        
+        # 后面 (z=-1)
+        for i in range(face_res):
+            for j in range(face_res):
+                v0 = vertex_offset + i * (face_res + 1) + j
+                v1 = vertex_offset + i * (face_res + 1) + (j + 1)
+                v2 = vertex_offset + (i + 1) * (face_res + 1) + (j + 1)
+                v3 = vertex_offset + (i + 1) * (face_res + 1) + j
+                # 确保面的法线方向一致（逆时针顺序）
+                faces.append((v0, v1, v2))
+                faces.append((v0, v2, v3))
+        vertex_offset += (face_res + 1) * (face_res + 1)
+        
+        # 右面 (x=1)
+        for j in range(face_res):
+            for k in range(face_res):
+                v0 = vertex_offset + j * (face_res + 1) + k
+                v1 = vertex_offset + (j + 1) * (face_res + 1) + k
+                v2 = vertex_offset + (j + 1) * (face_res + 1) + (k + 1)
+                v3 = vertex_offset + j * (face_res + 1) + (k + 1)
+                # 确保面的法线方向一致（逆时针顺序）
+                faces.append((v0, v1, v2))
+                faces.append((v0, v2, v3))
+        vertex_offset += (face_res + 1) * (face_res + 1)
+        
+        # 左面 (x=-1)
+        for j in range(face_res):
+            for k in range(face_res):
+                v0 = vertex_offset + j * (face_res + 1) + k
+                v1 = vertex_offset + j * (face_res + 1) + (k + 1)
+                v2 = vertex_offset + (j + 1) * (face_res + 1) + (k + 1)
+                v3 = vertex_offset + (j + 1) * (face_res + 1) + k
+                # 确保面的法线方向一致（逆时针顺序）
+                faces.append((v0, v1, v2))
+                faces.append((v0, v2, v3))
+        vertex_offset += (face_res + 1) * (face_res + 1)
+        
+        # 上面 (y=1)
+        for i in range(face_res):
+            for k in range(face_res):
+                v0 = vertex_offset + i * (face_res + 1) + k
+                v1 = vertex_offset + i * (face_res + 1) + (k + 1)
+                v2 = vertex_offset + (i + 1) * (face_res + 1) + (k + 1)
+                v3 = vertex_offset + (i + 1) * (face_res + 1) + k
+                # 确保面的法线方向一致（逆时针顺序）
+                faces.append((v0, v1, v2))
+                faces.append((v0, v2, v3))
+        vertex_offset += (face_res + 1) * (face_res + 1)
+        
+        # 下面 (y=-1)
+        for i in range(face_res):
+            for k in range(face_res):
+                v0 = vertex_offset + i * (face_res + 1) + k
+                v1 = vertex_offset + (i + 1) * (face_res + 1) + k
+                v2 = vertex_offset + (i + 1) * (face_res + 1) + (k + 1)
+                v3 = vertex_offset + i * (face_res + 1) + (k + 1)
+                # 确保面的法线方向一致（逆时针顺序）
+                faces.append((v0, v1, v2))
+                faces.append((v0, v2, v3))
+        
+        # 缩放到指定半径
+        scaled_vertices = []
+        for v in vertices:
+            scaled = (v[0] * radius, v[1] * radius, v[2] * radius)
+            scaled_vertices.append(scaled)
         
         # 写入OBJ文件
         with open(output_path, 'w') as f:
             # 写入顶点
-            for v in vertices:
+            for v in scaled_vertices:
                 f.write(f"v {v[0]} {v[1]} {v[2]}\n")
             
             # 写入面
             for face in faces:
-                f.write(f"f {face[0]} {face[1]} {face[2]}\n")
+                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
         
         print(f"均匀采样球体生成完成，保存到: {output_path}")
-        print(f"顶点数: {len(vertices)}, 面数: {len(faces)}")
+        print(f"顶点数: {len(scaled_vertices)}, 面数: {len(faces)}")
         
         # 可视化生成的网格
-        self.visualize_mesh(vertices, faces, title=f"均匀采样的球体: {os.path.basename(output_path)}", as_point_cloud=visualize_as_point_cloud, point_cloud_downsample=point_cloud_downsample)
+        if visualize:
+            self.visualize_mesh(scaled_vertices, faces, title=f"均匀采样的球体: {os.path.basename(output_path)}", as_point_cloud=visualize_as_point_cloud, point_cloud_downsample=point_cloud_downsample)
         
         return output_path
     
@@ -1365,10 +1492,10 @@ class SurfaceGenerator:
             # 添加网格
             vis.add_geometry(mesh)
             
-            # 设置渲染选项 - 灰白色填充，黑色边缘
+            # 设置渲染选项 - 灰白色填充，无边缘
             render_option = vis.get_render_option()
             render_option.mesh_show_back_face = True
-            render_option.mesh_show_wireframe = True
+            render_option.mesh_show_wireframe = False
             render_option.line_width = 1.0
         
         # 可视化边缘点（黑色）

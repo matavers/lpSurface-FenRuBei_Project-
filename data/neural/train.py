@@ -13,7 +13,8 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# 添加项目根目录到Python路径
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from core.neuralDevelopableSurfaceFitter import (
     NeuralDevelopableSurfaceFitter,
@@ -39,9 +40,55 @@ class DevelopableSurfaceDataset(Dataset):
         self.data = np.load(data_path, allow_pickle=True)
         self.max_interior_points = max_interior_points
         self.max_edge_points = max_edge_points
+        # 预处理数据，确保所有样本的边缘点列形状一致
+        self._preprocess_data()
         
     def __len__(self):
         return len(self.data)
+    
+    def _preprocess_data(self):
+        """
+        预处理数据，确保所有样本的边缘点列和控制点形状一致
+        """
+        preprocessed_data = []
+        for sample in self.data:
+            # 初始化边缘点列为固定形状
+            processed_sample = sample.copy()
+            processed_sample['edge_points'] = []
+            
+            # 处理原始边缘点列
+            original_edges = sample.get('edge_points', [])
+            for i in range(4):  # 确保有4条边
+                if i < len(original_edges):
+                    edge = original_edges[i]
+                    edge = np.array(edge)
+                    # 确保是2D数组
+                    if edge.ndim == 1:
+                        edge = edge.reshape(1, 3)
+                    # 采样或填充到固定长度
+                    if edge.shape[0] > self.max_edge_points:
+                        # 随机采样
+                        indices = np.random.choice(edge.shape[0], self.max_edge_points, replace=False)
+                        edge = edge[indices]
+                    elif edge.shape[0] < self.max_edge_points:
+                        # 填充
+                        padding = np.zeros((self.max_edge_points - edge.shape[0], 3))
+                        edge = np.vstack([edge, padding])
+                else:
+                    # 不足4条边时，创建空边缘点列
+                    edge = np.zeros((self.max_edge_points, 3))
+                processed_sample['edge_points'].append(edge)
+            
+            # 处理控制点，确保所有样本的控制点数量一致（32个）
+            # 四边形：2*M 控制点（32个）
+            curve_A = sample['curve_A_control']
+            curve_B = sample['curve_B_control']
+            control_points = np.vstack([curve_A, curve_B])
+            processed_sample['control_points'] = control_points
+            
+            preprocessed_data.append(processed_sample)
+        
+        self.data = preprocessed_data
     
     def __getitem__(self, idx):
         """
@@ -60,44 +107,19 @@ class DevelopableSurfaceDataset(Dataset):
             padding = np.zeros((self.max_interior_points - len(interior_points), 3))
             interior_points = np.vstack([interior_points, padding])
         
-        # 获取边缘点列
+        # 获取边缘点列并转换为numpy数组
         edge_points = sample['edge_points']
-        padded_edges = []
-        for edge in edge_points:
-            edge = np.array(edge)
-            if len(edge) > self.max_edge_points:
-                indices = np.random.choice(len(edge), self.max_edge_points, replace=False)
-                edge = edge[indices]
-            elif len(edge) < self.max_edge_points:
-                padding = np.zeros((self.max_edge_points - len(edge), 3))
-                edge = np.vstack([edge, padding])
-            padded_edges.append(edge)
+        edge_array = np.array(edge_points)
         
-        # 填充到4条边
-        while len(padded_edges) < 4:
-            padding = np.zeros((self.max_edge_points, 3))
-            padded_edges.append(padding)
+        # 分区类型 - 只处理四边形
+        partition_type = np.array([0, 1], dtype=np.float32)
         
-        # 分区类型
-        if sample['partition_type'] == 'triangle':
-            partition_type = np.array([1, 0], dtype=np.float32)
-        else:
-            partition_type = np.array([0, 1], dtype=np.float32)
-        
-        # 获取目标控制点
-        if sample['partition_type'] == 'triangle':
-            curve_control = sample['curve_control']
-            vertex = sample['vertex']
-            # 组合控制点：曲线控制点 + 顶点
-            control_points = np.vstack([curve_control, vertex[np.newaxis, :]])
-        else:
-            curve_A = sample['curve_A_control']
-            curve_B = sample['curve_B_control']
-            control_points = np.vstack([curve_A, curve_B])
+        # 使用预处理后的控制点
+        control_points = sample['control_points']
         
         return {
             'interior_points': torch.tensor(interior_points, dtype=torch.float32),
-            'edge_points': torch.tensor(np.array(padded_edges), dtype=torch.float32),
+            'edge_points': torch.tensor(edge_array, dtype=torch.float32),
             'partition_type': torch.tensor(partition_type, dtype=torch.float32),
             'control_points': torch.tensor(control_points, dtype=torch.float32)
         }
@@ -131,7 +153,7 @@ def generate_surface_from_control_points(control_points: torch.Tensor, partition
     """
     根据控制点生成直纹面点云
     Args:
-        control_points: 控制点 (B, 2M+1, 3)
+        control_points: 控制点 (B, 2M, 3)
         partition_type: 分区类型 (B, 2)
         M: 控制点数量
         num_u: u方向采样点数
@@ -140,7 +162,6 @@ def generate_surface_from_control_points(control_points: torch.Tensor, partition
         直纹面点云 (B, num_u*num_v, 3)
     """
     batch_size = control_points.shape[0]
-    is_triangle = partition_type[:, 0] > 0.5
     
     # 生成参数网格
     u = torch.linspace(0, 1, num_u, device=control_points.device)
@@ -153,50 +174,28 @@ def generate_surface_from_control_points(control_points: torch.Tensor, partition
     surface_points = []
     
     for b in range(batch_size):
-        if is_triangle[b]:
-            # 三角形（锥面）
-            curve = control_points[b, :M]  # (M, 3)
-            vertex = control_points[b, M:]  # (1, 3)
-            
-            # 插值曲线点
-            t = u_expand.flatten()
-            curve_idx = t * (M - 1)
-            curve_idx_low = curve_idx.long()
-            curve_idx_high = torch.clamp(curve_idx_low + 1, 0, M - 1)
-            t_local = (curve_idx - curve_idx_low.float()).unsqueeze(-1)
-            
-            curve_points_low = curve[curve_idx_low]
-            curve_points_high = curve[curve_idx_high]
-            curve_points = (1 - t_local) * curve_points_low + t_local * curve_points_high
-            
-            # 生成锥面
-            vertex_expand = vertex.unsqueeze(0).expand(num_u * num_v, -1)
-            v_expand_flat = v_expand.flatten().unsqueeze(-1)
-            
-            points = vertex_expand + v_expand_flat * (curve_points - vertex_expand)
-        else:
-            # 四边形（直纹面）
-            curve_A = control_points[b, :M]
-            curve_B = control_points[b, M:2*M]
-            
-            # 插值曲线A点
-            t = u_expand.flatten()
-            curve_idx = t * (M - 1)
-            curve_idx_low = curve_idx.long()
-            curve_idx_high = torch.clamp(curve_idx_low + 1, 0, M - 1)
-            t_local = (curve_idx - curve_idx_low.float()).unsqueeze(-1)
-            
-            curve_A_low = curve_A[curve_idx_low]
-            curve_A_high = curve_A[curve_idx_high]
-            curve_A_points = (1 - t_local) * curve_A_low + t_local * curve_A_high
-            
-            curve_B_low = curve_B[curve_idx_low]
-            curve_B_high = curve_B[curve_idx_high]
-            curve_B_points = (1 - t_local) * curve_B_low + t_local * curve_B_high
-            
-            # 生成直纹面
-            v_flat = v_expand.flatten().unsqueeze(-1)
-            points = (1 - v_flat) * curve_A_points + v_flat * curve_B_points
+        # 四边形（直纹面）
+        curve_A = control_points[b, :M]
+        curve_B = control_points[b, M:2*M]
+        
+        # 插值曲线A点
+        t = u_expand.flatten()
+        curve_idx = t * (M - 1)
+        curve_idx_low = curve_idx.long()
+        curve_idx_high = torch.clamp(curve_idx_low + 1, 0, M - 1)
+        t_local = (curve_idx - curve_idx_low.float()).unsqueeze(-1)
+        
+        curve_A_low = curve_A[curve_idx_low]
+        curve_A_high = curve_A[curve_idx_high]
+        curve_A_points = (1 - t_local) * curve_A_low + t_local * curve_A_high
+        
+        curve_B_low = curve_B[curve_idx_low]
+        curve_B_high = curve_B[curve_idx_high]
+        curve_B_points = (1 - t_local) * curve_B_low + t_local * curve_B_high
+        
+        # 生成直纹面
+        v_flat = v_expand.flatten().unsqueeze(-1)
+        points = (1 - v_flat) * curve_A_points + v_flat * curve_B_points
         
         surface_points.append(points)
     
@@ -234,32 +233,20 @@ def endpoint_loss(pred_control_points: torch.Tensor, target_control_points: torc
     计算端点约束损失
     """
     batch_size = pred_control_points.shape[0]
-    is_triangle = partition_type[:, 0] > 0.5
     
     total_loss = 0
     
     for b in range(batch_size):
-        if is_triangle[b]:
-            # 三角形：检查曲线端点和顶点
-            pred_curve = pred_control_points[b, :M]
-            target_curve = target_control_points[b, :M]
-            pred_vertex = pred_control_points[b, M:]
-            target_vertex = target_control_points[b, M:]
-            
-            loss = torch.sum((pred_curve[0] - target_curve[0]) ** 2)
-            loss += torch.sum((pred_curve[-1] - target_curve[-1]) ** 2)
-            loss += torch.sum((pred_vertex - target_vertex) ** 2)
-        else:
-            # 四边形：检查两条曲线的端点
-            pred_curve_A = pred_control_points[b, :M]
-            pred_curve_B = pred_control_points[b, M:2*M]
-            target_curve_A = target_control_points[b, :M]
-            target_curve_B = target_control_points[b, M:2*M]
-            
-            loss = torch.sum((pred_curve_A[0] - target_curve_A[0]) ** 2)
-            loss += torch.sum((pred_curve_A[-1] - target_curve_A[-1]) ** 2)
-            loss += torch.sum((pred_curve_B[0] - target_curve_B[0]) ** 2)
-            loss += torch.sum((pred_curve_B[-1] - target_curve_B[-1]) ** 2)
+        # 四边形：检查两条曲线的端点
+        pred_curve_A = pred_control_points[b, :M]
+        pred_curve_B = pred_control_points[b, M:2*M]
+        target_curve_A = target_control_points[b, :M]
+        target_curve_B = target_control_points[b, M:2*M]
+        
+        loss = torch.sum((pred_curve_A[0] - target_curve_A[0]) ** 2)
+        loss += torch.sum((pred_curve_A[-1] - target_curve_A[-1]) ** 2)
+        loss += torch.sum((pred_curve_B[0] - target_curve_B[0]) ** 2)
+        loss += torch.sum((pred_curve_B[-1] - target_curve_B[-1]) ** 2)
         
         total_loss += loss
     
@@ -334,45 +321,25 @@ class Trainer:
             num_u = 32
             
             for b in range(batch_size):
-                is_triangle = partition_type[b, 0] > 0.5
+                # 四边形：4条边
+                pred_curve_A = pred_control_points[b, :self.M]
+                pred_curve_B = pred_control_points[b, self.M:2*self.M]
                 
-                if is_triangle:
-                    # 三角形：3条边
-                    pred_curve = pred_control_points[b, :self.M]
-                    pred_vertex = pred_control_points[b, self.M:]
-                    
-                    # 提取边缘点
-                    edge1_pred = pred_surface[b, ::num_u]  # 曲线边
-                    edge2_pred = pred_vertex.unsqueeze(0).expand(num_u, -1)  # 顶点到曲线起点
-                    edge3_pred = pred_vertex.unsqueeze(0).expand(num_u, -1)  # 顶点到曲线终点
-                    
-                    target_edge1 = edge_points[b, 0]
-                    target_edge2 = edge_points[b, 1]
-                    target_edge3 = edge_points[b, 2]
-                    
-                    edge_loss += chamfer_distance(edge1_pred.unsqueeze(0), target_edge1.unsqueeze(0))
-                    edge_loss += chamfer_distance(edge2_pred.unsqueeze(0), target_edge2.unsqueeze(0))
-                    edge_loss += chamfer_distance(edge3_pred.unsqueeze(0), target_edge3.unsqueeze(0))
-                else:
-                    # 四边形：4条边
-                    pred_curve_A = pred_control_points[b, :self.M]
-                    pred_curve_B = pred_control_points[b, self.M:2*self.M]
-                    
-                    # 提取边缘点
-                    edge1_pred = pred_surface[b, ::num_u]  # 曲线A (v=0)
-                    edge2_pred = pred_surface[b, 31::num_u]  # 曲线B (v=1)
-                    edge3_pred = pred_surface[b, :32]  # u=0
-                    edge4_pred = pred_surface[b, 32*31:]  # u=1
-                    
-                    target_edge1 = edge_points[b, 0]
-                    target_edge2 = edge_points[b, 1]
-                    target_edge3 = edge_points[b, 2]
-                    target_edge4 = edge_points[b, 3]
-                    
-                    edge_loss += chamfer_distance(edge1_pred.unsqueeze(0), target_edge1.unsqueeze(0))
-                    edge_loss += chamfer_distance(edge2_pred.unsqueeze(0), target_edge2.unsqueeze(0))
-                    edge_loss += chamfer_distance(edge3_pred.unsqueeze(0), target_edge3.unsqueeze(0))
-                    edge_loss += chamfer_distance(edge4_pred.unsqueeze(0), target_edge4.unsqueeze(0))
+                # 提取边缘点
+                edge1_pred = pred_surface[b, ::num_u]  # 曲线A (v=0)
+                edge2_pred = pred_surface[b, 31::num_u]  # 曲线B (v=1)
+                edge3_pred = pred_surface[b, :32]  # u=0
+                edge4_pred = pred_surface[b, 32*31:]  # u=1
+                
+                target_edge1 = edge_points[b, 0]
+                target_edge2 = edge_points[b, 1]
+                target_edge3 = edge_points[b, 2]
+                target_edge4 = edge_points[b, 3]
+                
+                edge_loss += chamfer_distance(edge1_pred.unsqueeze(0), target_edge1.unsqueeze(0))
+                edge_loss += chamfer_distance(edge2_pred.unsqueeze(0), target_edge2.unsqueeze(0))
+                edge_loss += chamfer_distance(edge3_pred.unsqueeze(0), target_edge3.unsqueeze(0))
+                edge_loss += chamfer_distance(edge4_pred.unsqueeze(0), target_edge4.unsqueeze(0))
             
             edge_loss = edge_loss / batch_size
             
@@ -468,9 +435,46 @@ class Trainer:
         print(f"检查点已从 {filepath} 加载")
 
 
-def train_model(train_data_path: str, val_data_path: str, num_epochs: int = 200, 
+def custom_collate_fn(batch):
+    """
+    自定义批次处理函数，确保所有样本的边缘点列形状一致
+    """
+    # 提取批次中的所有元素
+    interior_points = []
+    edge_points = []
+    partition_types = []
+    control_points = []
+    
+    for item in batch:
+        interior_points.append(item['interior_points'])
+        edge_points.append(item['edge_points'])
+        partition_types.append(item['partition_type'])
+        control_points.append(item['control_points'])
+    
+    # 堆叠内部点云
+    interior_points = torch.stack(interior_points, 0)
+    
+    # 堆叠边缘点列
+    edge_points = torch.stack(edge_points, 0)
+    
+    # 堆叠分区类型
+    partition_types = torch.stack(partition_types, 0)
+    
+    # 堆叠控制点
+    control_points = torch.stack(control_points, 0)
+    
+    return {
+        'interior_points': interior_points,
+        'edge_points': edge_points,
+        'partition_type': partition_types,
+        'control_points': control_points
+    }
+
+
+def train_model(train_data_path: str, val_data_path: str, num_epochs: int = 100, 
                 batch_size: int = 32, learning_rate: float = 1e-4,
-                checkpoint_dir: str = "data/neural/checkpoints"):
+                checkpoint_dir: str = "data/neural/checkpoints",
+                patience: int = 10, min_delta: float = 0.001):
     """
     训练模型
     Args:
@@ -480,6 +484,8 @@ def train_model(train_data_path: str, val_data_path: str, num_epochs: int = 200,
         batch_size: 批次大小
         learning_rate: 学习率
         checkpoint_dir: 检查点保存目录
+        patience: 早停耐心值，连续多少轮验证损失无改善则停止
+        min_delta: 最小改善阈值，小于此值视为无改善
     """
     # 创建检查点目录
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -496,14 +502,15 @@ def train_model(train_data_path: str, val_data_path: str, num_epochs: int = 200,
     train_dataset = DevelopableSurfaceDataset(train_data_path)
     val_dataset = DevelopableSurfaceDataset(val_data_path)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=custom_collate_fn)
     
     # 创建训练器
     trainer = Trainer(model, device, learning_rate=learning_rate)
     
     # 训练循环
     best_val_loss = float('inf')
+    patience_counter = 0
     
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
@@ -524,14 +531,23 @@ def train_model(train_data_path: str, val_data_path: str, num_epochs: int = 200,
         trainer.scheduler.step()
         
         # 保存最佳模型
-        if val_metrics['val_loss'] < best_val_loss:
+        if val_metrics['val_loss'] < best_val_loss - min_delta:
             best_val_loss = val_metrics['val_loss']
             best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
             torch.save(model.state_dict(), best_model_path)
             print(f"最佳模型已保存，验证损失: {best_val_loss:.6f}")
+            patience_counter = 0  # 重置耐心计数器
+        else:
+            patience_counter += 1
+            print(f"早停计数器: {patience_counter}/{patience}")
+            
+        # 检查是否早停
+        if patience_counter >= patience:
+            print(f"验证损失在 {patience} 轮内无改善，停止训练")
+            break
         
         # 定期保存检查点
-        if (epoch + 1) % 50 == 0:
+        if (epoch + 1) % 20 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             trainer.save_checkpoint(checkpoint_path, epoch + 1, best_val_loss)
     
@@ -545,11 +561,11 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='训练直纹面拟合神经网络')
-    parser.add_argument('--train_data', type=str, default='data/neural/train_dataset.npy',
+    parser.add_argument('--train_data', type=str, default='dataset/train/train_dataset.npy',
                         help='训练数据路径')
-    parser.add_argument('--val_data', type=str, default='data/neural/test_dataset.npy',
+    parser.add_argument('--val_data', type=str, default='dataset/test/test_dataset.npy',
                         help='验证数据路径')
-    parser.add_argument('--epochs', type=int, default=200,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='批次大小')
@@ -557,7 +573,19 @@ if __name__ == "__main__":
                         help='学习率')
     parser.add_argument('--checkpoint_dir', type=str, default='data/neural/checkpoints',
                         help='检查点保存目录')
+    parser.add_argument('--patience', type=int, default=10,
+                        help='早停耐心值')
+    parser.add_argument('--min_delta', type=float, default=0.001,
+                        help='早停最小改善阈值')
+    parser.add_argument('--visualize_data', action='store_true',
+                        help='是否在训练前可视化训练数据')
     
     args = parser.parse_args()
     
-    train_model(args.train_data, args.val_data, args.epochs, args.batch_size, args.lr, args.checkpoint_dir)
+    # 跳过可视化，直接开始训练
+    print("跳过可视化，直接开始训练...")
+    
+    # 开始训练
+    print("开始训练...")
+    train_model(args.train_data, args.val_data, args.epochs, args.batch_size, args.lr, 
+                args.checkpoint_dir, args.patience, args.min_delta)

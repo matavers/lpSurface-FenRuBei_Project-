@@ -76,21 +76,9 @@ class AdvancedSurfacePartitioner:
         Returns:
             测地距离
         """
-        # 首先尝试使用Dijkstra算法计算测地距离
-        try:
-            # 构建边权重图
-            G = nx.Graph()
-            for v in range(self.num_vertices):
-                for neighbor in self.mesh.adjacency[v]:
-                    weight = np.linalg.norm(self.mesh.vertices[v] - self.mesh.vertices[neighbor])
-                    G.add_edge(v, neighbor, weight=weight)
-            
-            # 计算最短路径距离
-            distance = nx.shortest_path_length(G, source=i, target=j, weight='weight')
-            return distance
-        except:
-            # 如果失败，使用欧氏距离作为近似
-            return np.linalg.norm(self.mesh.vertices[i] - self.mesh.vertices[j])
+        # 直接使用欧氏距离作为近似，对于局部邻域来说已经足够准确
+        # 这样可以避免为每个顶点对构建完整的图，大大提高计算速度
+        return np.linalg.norm(self.mesh.vertices[i] - self.mesh.vertices[j])
 
     def _compute_cutting_width_diff(self, i: int, j: int) -> float:
         """
@@ -175,7 +163,7 @@ class AdvancedSurfacePartitioner:
             for i, j in batch:
                 # 早期终止：如果两个顶点距离太远，直接跳过
                 distance = np.linalg.norm(self.mesh.vertices[i] - self.mesh.vertices[j])
-                if distance > 0.5:  # 距离阈值，可根据实际情况调整
+                if distance > 1.0:  # 增大距离阈值，保留更多边
                     continue
                 
                 # 计算三个指标
@@ -276,20 +264,27 @@ class AdvancedSurfacePartitioner:
             # 转换为igraph格式
             g = ig.Graph.from_networkx(G)
             
+            # 确保边权重属性存在
+            if 'weight' not in g.es.attributes():
+                # 提取边权重并设置
+                weights = [G[u][v]['weight'] for u, v in G.edges()]
+                g.es['weight'] = weights
+            
             # 自适应分辨率参数
             # 根据图的大小和边权重分布自动调整resolution
             edge_weights = [d['weight'] for u, v, d in G.edges(data=True)]
             avg_weight = np.mean(edge_weights) if edge_weights else 0.5
             
             # 基于图大小和平均权重计算自适应分辨率
-            adaptive_resolution = self.resolution * (1 + 0.5 * (1 - avg_weight))
+            # 进一步降低分辨率以大幅减少分区数量
+            adaptive_resolution = self.resolution * 0.1 * (1 + 0.5 * (1 - avg_weight))
             
             # 多分辨率聚类
             # 先使用较低分辨率获取初始分区
             initial_partition = leidenalg.find_partition(
                 g, 
                 leidenalg.CPMVertexPartition, 
-                resolution_parameter=adaptive_resolution * 0.8,
+                resolution_parameter=adaptive_resolution * 0.2,
                 weights="weight"
             )
             
