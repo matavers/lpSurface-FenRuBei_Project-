@@ -9,24 +9,35 @@ import networkx as nx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .meshProcessor import MeshProcessor
+from .indicatorCalculator import IndicatorCalculator
 
 
 class AdvancedSurfacePartitioner:
-    def __init__(self, mesh: MeshProcessor, tool, resolution=0.1):
+    def __init__(self, mesh: MeshProcessor, tool, resolution=0.1, alpha=0.3, global_field='rolled_error'):
         """
         初始化高级表面分区器
         Args:
             mesh: 网格处理器
             tool: 刀具对象
             resolution: 聚类分辨率参数，控制分区数量
+            alpha: 全局引导强度参数，范围[0,1]
+            global_field: 全局场类型，可选值：'rolled_error', 'curvature', 'cutting_width'
         """
         self.mesh = mesh
         self.tool = tool
         self.num_vertices = len(mesh.vertices)
         self.resolution = resolution
+        self.alpha = alpha
+        self.global_field = global_field
+        
+        # 初始化指标计算器
+        self.indicator_calculator = IndicatorCalculator(mesh, tool)
         
         # 预计算几何特征
         self._precompute_features()
+        
+        # 预计算全局场值
+        self._precompute_global_field()
 
     def _precompute_features(self):
         """
@@ -41,6 +52,50 @@ class AdvancedSurfacePartitioner:
         self.mesh.calculate_rolled_error()
         
         print("顶点几何特征预计算完成")
+    
+    def _precompute_global_field(self):
+        """
+        预计算全局场值
+        """
+        print("预计算全局场值...")
+        
+        # 根据选择的全局场类型计算场值
+        if self.global_field == 'rolled_error':
+            # 使用直纹面逼近误差作为全局场
+            if hasattr(self.mesh, 'rolled_error'):
+                self.global_field_values = self.mesh.rolled_error
+            else:
+                # 如果没有rolled_error属性，计算它
+                self.mesh.calculate_rolled_error()
+                self.global_field_values = self.mesh.rolled_error
+        elif self.global_field == 'curvature':
+            # 使用曲率作为全局场
+            if hasattr(self.mesh, 'curvatures'):
+                self.global_field_values = self.mesh.curvatures
+            else:
+                # 如果没有curvatures属性，计算它
+                self.mesh._estimate_curvatures()
+                self.global_field_values = self.mesh.curvatures
+        elif self.global_field == 'cutting_width':
+            # 使用切削宽度作为全局场
+            if hasattr(self.mesh, 'max_cutting_widths'):
+                self.global_field_values = self.mesh.max_cutting_widths
+            else:
+                # 如果没有max_cutting_widths属性，计算它
+                self.mesh.calculate_max_cutting_width(self.tool)
+                self.global_field_values = self.mesh.max_cutting_widths
+        else:
+            # 默认使用直纹面逼近误差
+            if hasattr(self.mesh, 'rolled_error'):
+                self.global_field_values = self.mesh.rolled_error
+            else:
+                self.mesh.calculate_rolled_error()
+                self.global_field_values = self.mesh.rolled_error
+        
+        # 计算全局场的标准差，用于带宽参数
+        self.sigma_f = np.std(self.global_field_values) if np.std(self.global_field_values) > 0 else 1.0
+        
+        print("全局场值预计算完成")
 
     def _compute_local_curvature_similarity(self, i: int, j: int) -> float:
         """
@@ -178,38 +233,21 @@ class AdvancedSurfacePartitioner:
                 if distance > 0.5:  # 距离阈值，可根据实际情况调整
                     continue
                 
-                # 计算三个指标
-                curvature_sim = self._compute_local_curvature_similarity(i, j)
-                width_diff = self._compute_cutting_width_diff(i, j)
-                error_diff = self._compute_rolled_error_diff(i, j)
+                # 使用指标计算器计算三个新指标
+                gaussian_sim = self.indicator_calculator.calculate_gaussian_curvature_similarity(i, j)
+                geometric_sim = self.indicator_calculator.calculate_geometric_continuity_similarity(i, j)
+                developable_sim = self.indicator_calculator.calculate_developable_surface_error_similarity(i, j)
                 
-                # 标准化指标
-                curvature_sim_norm = curvature_sim / (self.curvature_std + 1e-8)
-                width_diff_norm = width_diff / (self.width_std + 1e-8)
-                error_diff_norm = error_diff / (self.error_std + 1e-8)
+                # 计算综合相似性（局部相似性）
+                local_weight = self.indicator_calculator.calculate_combined_similarity(i, j)
                 
-                # 使用高斯核函数归一化
-                sigma1 = 1.0
-                sigma2 = 1.0
-                sigma3 = 1.0
+                # 计算全局引导相似性
+                fi = self.global_field_values[i]
+                fj = self.global_field_values[j]
+                global_similarity = np.exp(-(fi - fj)**2 / (2 * self.sigma_f**2))
                 
-                f1 = np.exp(-curvature_sim_norm**2 / (2 * sigma1**2))
-                f2 = np.exp(-width_diff_norm**2 / (2 * sigma2**2))
-                f3 = np.exp(-error_diff_norm**2 / (2 * sigma3**2))
-                
-                # 自适应权重
-                # 根据特征的重要性动态调整权重
-                lambda1 = 0.3 + 0.2 * (self.curvature_std / (self.curvature_std + self.width_std + self.error_std))
-                lambda2 = 0.4 + 0.2 * (self.width_std / (self.curvature_std + self.width_std + self.error_std))
-                lambda3 = 0.3 + 0.2 * (self.error_std / (self.curvature_std + self.width_std + self.error_std))
-                
-                # 归一化权重
-                total_lambda = lambda1 + lambda2 + lambda3
-                lambda1 /= total_lambda
-                lambda2 /= total_lambda
-                lambda3 /= total_lambda
-                
-                weight = lambda1 * f1 + lambda2 * f2 + lambda3 * f3
+                # 组合权重
+                weight = (1 - self.alpha) * local_weight + self.alpha * global_similarity
                 
                 # 阈值过滤：只保留权重较高的边
                 if weight > 0.1:
@@ -336,63 +374,7 @@ class AdvancedSurfacePartitioner:
         print(f"备用聚类完成: {len(np.unique(labels))} 个分区")
         return labels
 
-    def _fit_partition_boundaries(self, labels: np.ndarray) -> np.ndarray:
-        """
-        拟合分区边界
-        Args:
-            labels: 分区标签数组
-        Returns:
-            优化后的分区标签数组
-        """
-        print("拟合分区边界...")
-        
-        # 提取边界顶点
-        boundary_vertices = []
-        for i in range(self.num_vertices):
-            neighbors = self.mesh.adjacency[i]
-            neighbor_labels = [labels[j] for j in neighbors]
-            if len(set(neighbor_labels)) > 1:
-                boundary_vertices.append(i)
-        
-        # 特殊边界处理
-        # 检测并处理尖锐边界和复杂边界
-        smoothed_labels = labels.copy()
-        
-        # 对边界进行平滑处理
-        for i in boundary_vertices:
-            neighbors = self.mesh.adjacency[i]
-            if neighbors:
-                # 计算邻居的标签分布
-                label_counts = {}
-                for j in neighbors:
-                    # 使用权重：距离越近，权重越大
-                    distance = np.linalg.norm(self.mesh.vertices[i] - self.mesh.vertices[j])
-                    weight = 1.0 / (distance + 1e-8)
-                    label_counts[labels[j]] = label_counts.get(labels[j], 0) + weight
-                
-                # 选择权重最大的标签
-                most_common_label = max(label_counts, key=label_counts.get)
-                smoothed_labels[i] = most_common_label
-        
-        # 边界平滑参数调整
-        # 进行多次平滑迭代以获得更平滑的边界
-        num_iterations = 2
-        for iteration in range(num_iterations):
-            temp_labels = smoothed_labels.copy()
-            for i in boundary_vertices:
-                neighbors = self.mesh.adjacency[i]
-                if neighbors:
-                    label_counts = {}
-                    for j in neighbors:
-                        distance = np.linalg.norm(self.mesh.vertices[i] - self.mesh.vertices[j])
-                        weight = 1.0 / (distance + 1e-8)
-                        label_counts[temp_labels[j]] = label_counts.get(temp_labels[j], 0) + weight
-                    
-                    most_common_label = max(label_counts, key=label_counts.get)
-                    smoothed_labels[i] = most_common_label
-        
-        print("分区边界拟合完成")
-        return smoothed_labels
+
 
     def partition_surface(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -411,10 +393,7 @@ class AdvancedSurfacePartitioner:
         # 3. 应用对称性约束
         labels = self._apply_symmetry_constraints(labels)
         
-        # 4. 拟合分区边界
-        labels = self._fit_partition_boundaries(labels)
-        
-        # 5. 确保分区连通性
+        # 4. 确保分区连通性
         labels = self._ensure_connectivity(labels)
         
         # 6. 重新编号标签为连续的整数
@@ -547,6 +526,8 @@ class AdvancedSurfacePartitioner:
         
         print("分区连通性检查完成")
         return labels
+
+
 
     def _extract_edge_midpoints(self, labels: np.ndarray) -> np.ndarray:
         """

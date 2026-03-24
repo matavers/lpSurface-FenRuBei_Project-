@@ -12,7 +12,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from main import FiveAxisMachiningSystem
 from utils.validation import MachiningValidator
-from core.surfaceGenerator import SurfaceGenerator
 
 
 def run_main_pipeline():
@@ -60,7 +59,6 @@ def run_main_pipeline():
         
         # 暂时不运行边缘拟合功能
         print("\n暂时不运行边缘拟合功能...")
-        surface_generator = SurfaceGenerator()
         
         # 获取原始网格的顶点和面
         vertices = np.asarray(system.mesh.vertices)
