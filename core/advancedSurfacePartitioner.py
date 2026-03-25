@@ -373,12 +373,89 @@ class AdvancedSurfacePartitioner:
         
         print(f"备用聚类完成: {len(np.unique(labels))} 个分区")
         return labels
+    
+    def _spectral_clustering(self, adjacency_matrix: np.ndarray) -> np.ndarray:
+        """
+        使用谱聚类算法进行分区
+        Args:
+            adjacency_matrix: 加权邻接矩阵
+        Returns:
+            分区标签数组
+        """
+        print("执行谱聚类...")
+        
+        # 1. 构建相似性矩阵 S
+        # 假设adjacency_matrix已经是对称非负的相似性矩阵
+        S = adjacency_matrix
+        
+        # 2. 构建度矩阵 D
+        D = np.diag(np.sum(S, axis=1))
+        
+        # 3. 计算归一化拉普拉斯矩阵 L
+        # 使用对称归一化形式：L=I-D^{-1/2}SD^{-1/2}
+        D_sqrt = np.diag(1.0 / np.sqrt(np.diag(D)))
+        D_sqrt[np.isinf(D_sqrt)] = 0  # 处理零度顶点
+        L = np.eye(self.num_vertices) - D_sqrt @ S @ D_sqrt
+        
+        # 4. 特征分解
+        # 计算前k个最小特征值对应的特征向量
+        # 自动估计k值
+        eigenvalues, eigenvectors = np.linalg.eigh(L)
+        
+        # 选择k值：观察特征值间隙
+        k = self._estimate_k(eigenvalues)
+        print(f"估计的分区数 k: {k}")
+        
+        # 5. 聚类特征向量
+        # 取前k个最小特征值对应的特征向量（跳过第一个特征值为0的平凡解）
+        if k > 1:
+            X = eigenvectors[:, :k]
+        else:
+            X = eigenvectors[:, [1]]  # 至少取一个特征向量
+        
+        # 6. 使用k-means对特征向量进行聚类
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=k, random_state=42)
+        labels = kmeans.fit_predict(X)
+        
+        print(f"谱聚类完成: {len(np.unique(labels))} 个分区")
+        return labels
+    
+    def _estimate_k(self, eigenvalues: np.ndarray) -> int:
+        """
+        根据特征值间隙估计k值
+        Args:
+            eigenvalues: 拉普拉斯矩阵的特征值
+        Returns:
+            估计的分区数k
+        """
+        # 排序特征值
+        sorted_eigenvalues = np.sort(eigenvalues)
+        
+        # 计算特征值间隙
+        gaps = []
+        for i in range(1, len(sorted_eigenvalues)):
+            gap = sorted_eigenvalues[i] - sorted_eigenvalues[i-1]
+            gaps.append(gap)
+        
+        # 找到最大的间隙
+        if gaps:
+            max_gap_index = np.argmax(gaps)
+            k = max_gap_index + 1
+            # 限制k的范围在2-20之间
+            k = max(2, min(20, k))
+        else:
+            k = 5  # 默认值
+        
+        return k
 
 
 
-    def partition_surface(self) -> Tuple[np.ndarray, np.ndarray]:
+    def partition_surface(self, clustering_method='leiden') -> Tuple[np.ndarray, np.ndarray]:
         """
         执行表面分区
+        Args:
+            clustering_method: 聚类方法，可选值：'leiden', 'spectral', 'alternative'
         Returns:
             分区标签数组和中点边缘点数组
         """
@@ -387,8 +464,22 @@ class AdvancedSurfacePartitioner:
         # 1. 构建加权邻接矩阵
         adjacency_matrix = self._build_weighted_adjacency_matrix()
         
-        # 2. 执行Leiden聚类
-        labels = self._leiden_clustering(adjacency_matrix)
+        # 2. 执行聚类
+        if clustering_method == 'spectral':
+            # 执行谱聚类
+            labels = self._spectral_clustering(adjacency_matrix)
+        elif clustering_method == 'alternative':
+            # 执行备用聚类
+            G = nx.Graph()
+            G.add_nodes_from(range(self.num_vertices))
+            for i in range(self.num_vertices):
+                for j in range(i+1, self.num_vertices):
+                    if adjacency_matrix[i, j] > 0:
+                        G.add_edge(i, j, weight=adjacency_matrix[i, j])
+            labels = self._alternative_clustering(G)
+        else:
+            # 执行Leiden聚类
+            labels = self._leiden_clustering(adjacency_matrix)
         
         # 3. 应用对称性约束
         labels = self._apply_symmetry_constraints(labels)

@@ -204,7 +204,7 @@ def run_test():
     print("1. 直接生成圆锥面网格...")
     height = 2.0
     radius = 1.0
-    resolution = 50  # 控制网格密度
+    resolution = 150  # 控制网格密度，增加10倍点云数量
     mesh, vertex_params = create_cone_mesh(height, radius, resolution)
     print(f"网格生成完成: {len(mesh.vertices)} 个顶点, {len(mesh.triangles)} 个三角形")
     

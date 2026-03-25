@@ -1,341 +1,212 @@
-# 五轴加工路径规划系统
+# 新算法实现说明
 
-## 项目简介
+## 算法流程
 
-本项目是一个五轴加工路径规划系统，用于生成复杂曲面的高效加工路径。系统支持表面分区、工具方向场生成、等残留高度场计算、刀具路径规划、非球形刀具模型、G代码导出和加工动画可视化等功能，可用于叶轮、模具等复杂零件的加工。
+新算法实现了从NURBS曲面到刀具路径的完整流程，包括以下步骤：
 
-**最新更新（2026年3月）**：
-- 实现基于算法version2的高级表面分区器，使用Leiden聚类算法
-- 基于新指标的分区算法：局部曲率相似性、最大切削宽度差异、直纹面逼近误差
-- 优化可视化逻辑，在一个窗口中显示颜色块标示的分区和中点
-- 添加分区边缘中点提取功能
-- 修复各种错误，确保程序稳定运行
-- 优化性能，使用并行计算加速邻接矩阵构建
-- 添加run_partition_only模式，只运行分区并保存数据
-- 更新命令行参数，使用--path参数指定OBJ文件路径
-- 添加网格可视化功能，在执行核心算法前可视化当前操作的网格
-- 优化参数验证逻辑，确保参数组合的正确性
-- 实现直纹面拟合功能，根据逼近误差阈值确定直纹面类型
-- 添加--developable-fit和--developable-error命令行参数，控制直纹面拟合功能
+1. **NURBS曲面创建**：创建或加载NURBS曲面
+2. **几何属性计算**：计算高斯曲率、主曲率和法向量
+3. **点云采样**：按照算法中的采样方式生成点云
+4. **网格创建**：将点云转换为三角网格
+5. **指标计算**：计算TAR和3个新的指标（高斯曲率相似性、几何连续性相似性、直纹面逼近误差相似性）
+6. **加权邻接矩阵构建**：使用新指标构建加权邻接矩阵
+7. **Leiden分区**：运行Leiden聚类算法进行分区
+8. **二次分区**：（可选）基于直纹面拟合误差进行二次分区
+9. **刀具路径生成**：为每个分区生成刀具路径
 
-## 项目结构
+## 核心组件
 
-```
-├── core/                    # 核心算法模块
-│   ├── __init__.py
-│   ├── advancedSurfacePartitioner.py # 基于新指标的高级表面分区器
-│   ├── isoScallopField.py   # 等残留高度场生成
-│   ├── meshProcessor.py     # 网格处理
-│   ├── nonSphericalTool.py  # 非球面刀具模型
-│   ├── pathGenerator.py     # 路径生成
-│   ├── surfaceGenerator.py  # 曲面生成器
-│   ├── toolOrientationField.py # 工具方向场生成
-├── utils/                   # 工具函数
-│   ├── __init__.py
-│   ├── geometryTools.py     # 几何计算工具
-│   ├── validation.py        # 加工验证工具
-│   ├── visualization.py     # 可视化工具
-│   └── visualize_results.py # 结果可视化工具
-├── data/                    # 数据存储
-│   └── models/              # 模型文件
-├── config/                  # 配置文件
-│   └── settings.json
-├── tests/                   # 测试文件
-│   ├── test_system.py       # 系统测试
-│   ├── test_edge_midpoint.py # 边缘中点测试
-│   └── test_partition_edge_fitting.py # 分区边缘拟合测试
-├── output/                  # 输出目录
-├── main.py                  # 主程序入口
-├── requirements.txt         # 依赖包
-└── README.md                # 项目说明
+### 1. NURBS曲面处理器 (`utils/nurbsSurfaceProcessor.py`)
+
+**功能**：
+- 创建测试NURBS曲面
+- 计算曲面上任意点的坐标
+- 计算法向量
+- 计算高斯曲率和主曲率
+- 从曲面采样点云（支持均匀采样和自适应采样）
+- 将点云转换为三角网格
+
+**使用示例**：
+```python
+from utils.nurbsSurfaceProcessor import NURBSSurfaceProcessor
+
+# 创建处理器
+processor = NURBSSurfaceProcessor()
+
+# 创建测试曲面
+surface = processor.create_test_surface()
+
+# 采样点云
+points, normals, curvatures, principal_curvatures = processor.sample_points(
+    resolution_u=30,
+    resolution_v=30,
+    adaptive=True,
+    curvature_threshold=0.1
+)
+
+# 创建网格
+mesh = processor.create_mesh()
 ```
 
-## 安装与依赖
+### 2. 指标计算器 (`core/indicatorCalculator.py`)
 
-### 依赖包
+**功能**：
+- 计算TAR（Tool Accessible Region）
+- 计算高斯曲率相似性
+- 计算几何连续性相似性
+- 计算直纹面逼近误差相似性
+- 计算综合相似性
 
-项目依赖以下包：
-- open3d
-- numpy
-- scipy
-- networkx
+**使用示例**：
+```python
+from core.indicatorCalculator import IndicatorCalculator
 
-**可选依赖**：
-- matplotlib (用于可视化功能)
-- CGAL (用于加速几何计算)
-- community (用于Louvain聚类算法)
-- leidenalg (用于Leiden聚类算法)
-- igraph (用于Leiden聚类算法)
+# 创建指标计算器
+calculator = IndicatorCalculator(mesh_processor, tool)
 
-**注意**：系统会在可选依赖不可用时使用替代实现，确保核心功能正常运行。
+# 计算相似性指标
+gaussian_sim = calculator.calculate_gaussian_curvature_similarity(0, 1)
+geometric_sim = calculator.calculate_geometric_continuity_similarity(0, 1)
+developable_sim = calculator.calculate_developable_surface_error_similarity(0, 1)
+combined_sim = calculator.calculate_combined_similarity(0, 1)
+```
 
-### 安装方法
+### 3. 高级表面分区器 (`core/advancedSurfacePartitioner.py`)
 
-1. 克隆项目到本地
-2. 可以在pyCharm中打开，会自动配置环境
-3. （备用）手动安装依赖：
-   ```bash
-   pip install -r requirements.txt
-   ```
+**功能**：
+- 构建基于新指标的加权邻接矩阵
+- 执行Leiden聚类分区
+- 应用对称性约束
+- 拟合分区边界
+- 执行二次分区（可选）
+- 确保分区连通性
 
-## 使用方法
+**使用示例**：
+```python
+from core.advancedSurfacePartitioner import AdvancedSurfacePartitioner
 
-### 基本使用
+# 创建分区器
+partitioner = AdvancedSurfacePartitioner(
+    mesh_processor,
+    tool,
+    resolution=0.1,
+    enable_secondary_partitioning=True  # 启用二次分区
+)
 
-1. 准备网格文件（支持.obj格式）
-2. 运行主程序：
-   ```bash
-   # 使用曲面函数生成网格
-   python main.py --surface=sphere
-   
-   # 直接使用OBJ文件
-   python main.py --mesh-algorithm=obj --path=test_sphere.obj
-   ```
+# 执行分区
+labels, edge_midpoints = partitioner.partition_surface()
+```
 
-3. 只运行分区并保存数据：
-   ```bash
-   # 使用曲面函数
-   python main.py --surface=sphere --partition-only
-   
-   # 直接使用OBJ文件
-   python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only
-   ```
+### 4. 路径生成器 (`core/pathGenerator.py`)
 
-### 命令行参数
+**功能**：
+- 连接等值线形成连续路径
+- 优化路径序列
+- 计算刀位点
+- 生成最终刀具路径
+- 导出为G代码
 
-系统支持以下命令行参数：
+**使用示例**：
+```python
+from core.pathGenerator import PathGenerator
 
-| 参数 | 描述 | 可选值 | 默认值 |
-|------|------|--------|--------|
-| `--partition-only` | 只运行分区并保存数据，不执行刀具路径规划 | - | 无 |
-| `--mesh-algorithm` | 网格生成算法 | delaunay_cocone, bpa, poisson, tsdf, obj | delaunay_cocone |
-| `--surface` | 曲面函数名称 | sphere, torus, saddle | 无 |
-| `--resolution` | 曲面采样分辨率 | 整数 | 50 |
-| `--path` | OBJ文件路径（仅与--mesh-algorithm=obj共存） | 文件路径 | 无 |
-| `--developable-fit` | 开启直纹面逼近功能，不计算刀具路径 | - | 无 |
-| `--developable-error` | 直纹面逼近误差阈值 | 浮点数 | 0.01 |
+# 创建路径生成器
+path_generator = PathGenerator(mesh_processor, iso_curves, tool_orientations, tool)
 
-### 参数验证规则
+# 生成刀具路径
+tool_paths = path_generator.generate_final_path()
 
-- `--path` 只能与 `--mesh-algorithm=obj` 共存
-- `--surface` 只能与非 obj 算法共存
-- 当 `--mesh-algorithm=obj` 时，必须指定 `--path`
-- 当使用 `--surface` 时，不能指定 `--path`
-- 必须指定 `--path` 或 `--surface` 中的一个
-- 如果指定 `--developable-fit`，则开启直纹面逼近功能，不计算刀具路径
-- 如果计算刀具路径，则不逼近直纹面
+# 导出为G代码
+path_generator.export_to_gcode(tool_paths['paths'], 'output.gcode')
+```
 
-### 使用示例
+## 完整工作流
 
-1. 使用默认算法和曲面函数：
-   ```bash
-   python main.py --surface=sphere
-   ```
+**脚本**：`scripts/new_algorithm_workflow.py`
 
-2. 使用指定算法和曲面函数：
-   ```bash
-   python main.py --surface=sphere --mesh-algorithm=bpa --resolution=50
-   ```
+**功能**：实现从NURBS曲面到刀具路径的完整流程
 
-3. 直接使用OBJ文件（不进行重建）：
-   ```bash
-   python main.py --mesh-algorithm=obj --path=test_sphere.obj
-   ```
-
-4. 只运行分区（使用曲面函数）：
-   ```bash
-   python main.py --surface=sphere --partition-only
-   ```
-
-5. 只运行分区（直接使用OBJ文件）：
-   ```bash
-   python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only
-   ```
-
-6. 综合使用多个参数：
-   ```bash
-   python main.py --surface=torus --mesh-algorithm=poisson --resolution=100 --partition-only
-   ```
-
-7. 开启直纹面拟合功能：
-   ```bash
-   python main.py --surface=sphere --developable-fit --developable-error=0.01
-   ```
-
-8. 开启直纹面拟合功能（使用OBJ文件）：
-   ```bash
-   python main.py --mesh-algorithm=obj --path=test_sphere.obj --developable-fit --developable-error=0.005
-   ```
-
-### 测试程序
-
-**tips**:如果使用python虚拟环境，先激活虚拟环境
-   ```bash
-   .\venv\Scripts\activate
-   ```
-
-1. 运行系统测试：
-   ```bash
-   python tests/test_system.py
-   ```
-
-2. 运行边缘中点测试：
-   ```bash
-   python tests/test_edge_midpoint.py
-   ```
-
-3. 运行分区边缘拟合测试：
-   ```bash
-   python tests/test_partition_edge_fitting.py
-   ```
-
-### 结果可视化
-
-使用可视化工具查看结果：
+**运行方式**：
 ```bash
-python utils/visualize_results.py
+python scripts/new_algorithm_workflow.py
 ```
 
-该工具提供了一个GUI界面，允许用户浏览output目录下的所有计算结果文件夹，并选择特定的结果文件夹进行可视化。
+**输出**：
+- 分区结果（可视化）
+- 刀具路径（CSV文件）
+- 路径可视化
 
-## 核心功能
+## 测试方法
 
-1. **网格处理**：加载和处理3D网格模型，支持曲率估计和几何特征提取
-2. **表面分区**：基于新指标的高级表面分区器，使用Leiden聚类算法
-   - 局部曲率相似性
-   - 最大切削宽度差异
-   - 直纹面逼近误差
-3. **工具方向场**：生成优化的工具方向，支持种子点选择和贪心TAR选择算法
-4. **等残留高度场**：计算等残留高度的标量场，支持泊松方程求解和固定点迭代优化
-5. **刀具路径生成**：生成高效的五轴加工路径，支持等值线自动连接和模拟退火优化
-6. **非球形刀具模型**：支持椭球形、圆柱形、球形、锥形、自定义刀具，实现完整的碰撞检测和切削宽度计算
-7. **加工验证**：检查刀具路径碰撞，计算残留高度，评估路径平滑度和方向稳定性
-8. **G代码导出**：支持五轴加工的完整G代码生成，包括工具长度补偿和进给速度优化
-9. **曲面生成**：生成自定义曲面的OBJ文件，支持多种预设曲面
-10. **边缘中点提取**：提取分区边缘的中点，用于可视化和后续处理
-11. **可视化**：在一个窗口中显示颜色块标示的分区和中点，优化边缘显示
-12. **网格可视化**：在执行核心算法前可视化当前操作的网格，确认采样效果
-13. **分区结果保存和加载**：支持将分区结果保存到文件并加载
-14. **直纹面拟合**：根据逼近误差阈值确定直纹面类型，通过样条曲线拟合为直纹面
-15. **直纹面类型检测**：自动检测直纹面的直线端或尖锐端，确定直线或尖端所在位置
+### 1. 单元测试
 
-## 系统配置
+**测试NURBS曲面处理器**：
+```bash
+python -c "from utils.nurbsSurfaceProcessor import NURBSSurfaceProcessor; processor = NURBSSurfaceProcessor(); surface = processor.create_test_surface(); points, normals, curvatures, principal_curvatures = processor.sample_points(resolution_u=20, resolution_v=20, adaptive=False); print('NURBS处理器测试成功')"
+```
 
-配置文件位于 `config/settings.json`，可根据需要调整参数：
+**测试指标计算器**：
+```bash
+python -c "from core.meshProcessor import MeshProcessor; from core.nonSphericalTool import NonSphericalTool; from core.indicatorCalculator import IndicatorCalculator; import numpy as np; import open3d as o3d; pcd = o3d.geometry.PointCloud(); pcd.points = o3d.utility.Vector3dVector(np.random.rand(100, 3)); mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=5); mesh_processor = MeshProcessor(mesh); mesh_processor.gaussian_curvatures = np.random.rand(100); mesh_processor.principal_curvatures = np.random.rand(100, 2); mesh_processor.rolled_error = np.random.rand(100); tool = NonSphericalTool(profile_type='ellipsoidal', params={'semi_axes': [1.0, 0.5]}); calculator = IndicatorCalculator(mesh_processor, tool); sim = calculator.calculate_combined_similarity(0, 1); print('指标计算器测试成功')"
+```
 
-- 刀具参数
-- 分区参数（resolution参数控制分区数量）
-- 可视化设置
-- 路径生成参数
+### 2. 集成测试
 
-## 输出结果
+**运行完整工作流**：
+```bash
+python scripts/new_algorithm_workflow.py
+```
 
-系统运行后在 `output/` 目录生成以下文件：
+## 配置参数
 
-- `metrics.json`：加工路径的性能指标
-- `partition_labels.npy`：分区标签
-- `edge_midpoints.npy`：边缘中点
-- `vertices.npy`：网格顶点
-- `triangles.npy`：网格三角形
-- `edge_points.npy`：边缘点
-- `tool_path_*.csv`：各分区的刀具路径
-- `developable_surfaces.json`：直纹面拟合结果（当开启直纹面拟合时）
+### NURBS曲面处理器参数
+- `resolution_u`：u方向的采样分辨率
+- `resolution_v`：v方向的采样分辨率
+- `adaptive`：是否使用自适应采样
+- `curvature_threshold`：曲率阈值，用于自适应采样
 
-## 性能优化
+### 高级表面分区器参数
+- `resolution`：聚类分辨率参数，控制分区数量
+- `enable_secondary_partitioning`：是否启用二次分区
 
-系统使用以下技术提高性能：
-
-1. **NumPy向量化**：使用NumPy向量化操作替代Python循环，显著提升计算速度
-2. **并行计算**：使用ThreadPoolExecutor并行处理邻接矩阵构建
-3. **数据结构优化**：使用高效的数据结构提高算法效率
-4. **算法优化**：采用Leiden聚类算法，提供更好的分区质量和性能
-5. **内存管理**：优化内存使用，减少不必要的内存分配
+### 指标计算器参数
+- `sigma_k`：高斯曲率相似性的带宽参数
+- `sigma_n`：几何连续性相似性的法向变化带宽参数
+- `sigma_r`：直纹面逼近误差相似性的带宽参数
+- `weights`：综合相似性的权重 (高斯曲率权重, 几何连续性权重, 直纹面误差权重)
 
 ## 注意事项
 
-1. 网格模型应尽量简化，以提高计算速度
-2. 对于复杂模型，可能需要调整分区参数（resolution）
-3. 可视化功能需要Matplotlib库支持
-4. Leiden聚类算法需要leidenalg和igraph库支持
+1. **计算性能**：对于复杂曲面，采样分辨率和分区数量会影响计算时间
+2. **内存使用**：高分辨率采样可能会占用大量内存
+3. **依赖项**：需要安装以下依赖：
+   - numpy
+   - scipy
+   - open3d
+   - networkx
+   - leidenalg (可选，用于Leiden聚类)
+   - igraph (可选，用于Leiden聚类)
 
-## 测试结果
+## 常见问题
 
-系统已在以下场景进行测试：
+1. **NURBS曲面创建失败**：检查控制点格式是否正确
+2. **分区数量过多**：调整`resolution`参数
+3. **二次分区不执行**：确保`enable_secondary_partitioning`为True，且分区大小足够大
+4. **刀具路径生成失败**：检查网格质量和分区结果
 
-1. 球体模型（半径10mm，分辨率50）
-2. 复杂曲面模型
-3. 自定义曲面模型（通过曲面生成器生成）
+## 性能优化
 
-### 球体模型测试结果
+1. **向量化计算**：NURBS曲面处理器已优化为使用向量化计算
+2. **并行处理**：加权邻接矩阵构建使用了并行计算
+3. **缓存机制**：指标计算器使用缓存减少重复计算
 
-**测试配置**：
-- 网格：球体，半径10mm，4902个顶点，9800个面
-- 刀具：椭球形，半轴[9.0, 3.0]
-- 残留高度：0.4mm
-- 分区算法：Leiden聚类，resolution=0.05
+## 未来改进
 
-**测试结果**：
-- 总处理时间：约25分钟
-- 分区数量：约380个
-- 路径总长度：约640mm
-- 路径数量：约40条
-- 路径点数量：约4200个
+1. **支持更多NURBS曲面格式**：增加对外部NURBS文件的支持
+2. **更高级的采样策略**：实现更智能的自适应采样算法
+3. **优化分区算法**：进一步改进Leiden聚类的参数设置
+4. **更多刀具类型支持**：扩展对不同刀具类型的支持
 
-### 分区边缘拟合测试结果
+## 联系信息
 
-**测试配置**：
-- 网格：修改后的球体模型（`data/models/modified_sphere.obj`）
-- 分区算法：Leiden聚类
-
-**测试结果**：
-- 分区数量：根据模型复杂度自动调整
-- 边缘中点提取：约5000个中点
-- 可视化：在一个窗口中显示颜色块标示的分区和红色中点
-- 分区结果：保存到 `output/[timestamp]/partition_labels.npy`
-
-## 高级功能
-
-### 自定义分区参数
-
-可以通过修改配置文件或命令行参数调整分区参数：
-
-```python
-# 在main.py中修改分区参数
-system.config['algorithm']['partition_resolution'] = 0.05  # 降低分辨率，减少分区数量
-```
-
-### 并行计算
-
-系统默认使用并行计算加速邻接矩阵构建，可以通过调整batch_size参数优化性能：
-
-```python
-# 在advancedSurfacePartitioner.py中修改批处理大小
-batch_size = 1000  # 调整批处理大小
-```
-
-### 结果可视化
-
-可视化工具提供了以下功能：
-- 浏览和选择结果文件夹
-- 可视化分区、方向场、刀具路径
-- 支持跳过点云可视化以提高性能
-- 显示边缘中点和分区边缘
-
-## 故障排除
-
-1. **Leiden聚类失败**：如果leidenalg库未安装，系统会自动使用Louvain聚类作为替代
-2. **可视化窗口无响应**：尝试勾选"跳过点云可视化"复选框
-3. **分区数量过多**：调整resolution参数，增大值以减少分区数量
-4. **内存不足**：尝试使用简化的网格模型
-
-## 未来计划
-
-1. 支持更多类型的刀具模型
-2. 实现更高级的路径优化算法
-3. 添加更多的加工验证功能
-4. 支持更多的文件格式
-5. 提供更详细的用户界面
-
-## 许可证
-
-本项目为开源项目，采用MIT许可证。
+如有问题或建议，请联系开发团队。

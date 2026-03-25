@@ -18,27 +18,27 @@ from utils.visualization import Visualizer
 import open3d as o3d
 
 
-def create_sphere_points(radius=1.0, resolution=50):
+def create_sphere_mesh(radius=1.0, resolution=50):
     """
-    通过参数方程创建球面点云
+    通过参数方程直接生成球面三角网格
     Args:
         radius: 球半径
         resolution: 采样分辨率
     Returns:
-        points: 点云
-        normals: 法向量
-        gaussian_curvatures: 高斯曲率
-        principal_curvatures: 主曲率
+        mesh: Open3D网格对象
+        vertex_params: 每个顶点对应的参数 (theta, phi) 列表
     """
-    points = []
-    normals = []
-    gaussian_curvatures = []
-    principal_curvatures = []
+    vertices = []
+    vertex_params = []  # 存储每个顶点的参数 (theta, phi)
     
-    # 使用球坐标系采样
-    for i in range(resolution + 1):
+    # 1. 生成球面顶点
+    # 使用球坐标系，theta从0到pi，phi从0到2pi
+    n_theta = resolution + 1
+    n_phi = resolution + 1
+    
+    for i in range(n_theta):
         theta = np.pi * i / resolution  # 极角
-        for j in range(resolution + 1):
+        for j in range(n_phi):
             phi = 2 * np.pi * j / resolution  # 方位角
             
             # 参数方程
@@ -46,125 +46,67 @@ def create_sphere_points(radius=1.0, resolution=50):
             y = radius * np.sin(theta) * np.sin(phi)
             z = radius * np.cos(theta)
             
-            # 法向量（球面的法向量指向径向）
-            normal = np.array([x, y, z]) / radius
-            
-            # 球面的高斯曲率和主曲率（解析解）
-            K = 1 / (radius**2)  # 高斯曲率
-            k1 = 1 / radius  # 主曲率1
-            k2 = 1 / radius  # 主曲率2
-            
-            points.append([x, y, z])
-            normals.append(normal)
-            gaussian_curvatures.append(K)
-            principal_curvatures.append([k1, k2])
+            vertices.append([x, y, z])
+            vertex_params.append((theta, phi))
     
-    return np.array(points), np.array(normals), np.array(gaussian_curvatures), np.array(principal_curvatures)
+    # 2. 构造三角形索引
+    triangles = []
+    # 处理非极点区域（四边形拆分为两个三角形）
+    for i in range(n_theta - 1):  # 从第0层到第resolution-1层
+        for j in range(resolution):  # 每层有 resolution 个四边形（因为首尾点重复，但只连到第一个）
+            # 当前层索引
+            idx_00 = i * n_phi + j
+            idx_01 = i * n_phi + (j + 1)
+            # 下一层索引
+            idx_10 = (i + 1) * n_phi + j
+            idx_11 = (i + 1) * n_phi + (j + 1)
+            
+            # 第一个三角形 (左下-右下-左上)
+            triangles.append([idx_00, idx_01, idx_10])
+            # 第二个三角形 (右上-左上-右下)
+            triangles.append([idx_01, idx_11, idx_10])
+    
+    # 创建Open3D网格对象
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(np.array(vertices))
+    mesh.triangles = o3d.utility.Vector3iVector(np.array(triangles))
+    mesh.compute_vertex_normals()
+    
+    return mesh, vertex_params
 
 
-def create_mesh_from_points(points):
+def compute_sphere_properties(mesh, vertex_params, radius=1.0):
     """
-    从点云创建网格
+    为每个顶点计算解析几何特性（法向量、高斯曲率、主曲率）
+    Args:
+        mesh: Open3D网格
+        vertex_params: 每个顶点的 (theta, phi) 参数列表
+        radius: 球半径
+    Returns:
+        normals, gaussian_curvatures, principal_curvatures
     """
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
+    vertices = np.asarray(mesh.vertices)
+    n_vertices = len(vertices)
+    normals = np.zeros((n_vertices, 3))
+    gaussian_curvatures = np.zeros(n_vertices)
+    principal_curvatures = np.zeros((n_vertices, 2))
     
-    # 估计法向量，使用较大的搜索半径以获得更一致的法线方向
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
-    # 法线方向一致性调整
-    pcd.orient_normals_consistent_tangent_plane(100)
+    # 球面的高斯曲率和主曲率（解析解）
+    K = 1 / (radius**2)  # 高斯曲率
+    k = 1 / radius  # 主曲率（球面的两个主曲率相等）
     
-    # 使用Ball Pivoting Algorithm (BPA)创建表面网格
-    # BPA更适合创建表面网格，不会生成内部面
-    print("使用BPA算法创建网格...")
-    # 计算点云密度，用于确定球半径
-    distances = pcd.compute_nearest_neighbor_distance()
-    avg_dist = np.mean(distances)
-    radii = [avg_dist * 1.5, avg_dist * 2.0, avg_dist * 2.5]
+    for i, (theta, phi) in enumerate(vertex_params):
+        # 法向量（球面的法向量指向径向）
+        normal = vertices[i] / radius
+        normals[i] = normal
+        
+        # 高斯曲率
+        gaussian_curvatures[i] = K
+        
+        # 主曲率
+        principal_curvatures[i] = [k, k]
     
-    try:
-        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-            pcd, o3d.utility.DoubleVector(radii)
-        )
-        print(f"BPA网格创建完成: {len(mesh.vertices)} 个顶点, {len(mesh.triangles)} 个三角形")
-        
-        # 移除BPA创建的多余平面
-        # 计算每个三角形的中心
-        triangle_centers = []
-        for triangle in mesh.triangles:
-            v0 = mesh.vertices[triangle[0]]
-            v1 = mesh.vertices[triangle[1]]
-            v2 = mesh.vertices[triangle[2]]
-            center = (v0 + v1 + v2) / 3
-            triangle_centers.append(center)
-        
-        # 只保留外部的三角形
-        filtered_triangles = []
-        for i, center in enumerate(triangle_centers):
-            center_np = np.array(center)
-            # 对于球面，检查点到原点的距离
-            center_dist = np.linalg.norm(center_np)
-            if center_dist > 0.95 and center_dist < 1.05:  # 只保留球面表面的三角形
-                filtered_triangles.append(mesh.triangles[i])
-        
-        # 创建新的网格
-        if filtered_triangles:
-            new_mesh = o3d.geometry.TriangleMesh()
-            new_mesh.vertices = mesh.vertices
-            new_mesh.triangles = o3d.utility.Vector3iVector(filtered_triangles)
-            new_mesh.compute_vertex_normals()
-            mesh = new_mesh
-            print(f"过滤后网格: {len(mesh.vertices)} 个顶点, {len(mesh.triangles)} 个三角形")
-        else:
-            mesh.compute_vertex_normals()
-    except Exception as e:
-        print(f"BPA算法失败: {e}，使用泊松重建作为备选")
-        # 使用泊松重建作为备选
-        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=6)
-        
-        # 使用点云的边界框裁剪
-        bbox = pcd.get_axis_aligned_bounding_box()
-        mesh = mesh.crop(bbox)
-        
-        # 移除内部面和多余的平面
-        # 计算每个三角形的中心
-        triangle_centers = []
-        for triangle in mesh.triangles:
-            v0 = mesh.vertices[triangle[0]]
-            v1 = mesh.vertices[triangle[1]]
-            v2 = mesh.vertices[triangle[2]]
-            center = (v0 + v1 + v2) / 3
-            triangle_centers.append(center)
-        
-        # 只保留外部的三角形
-        filtered_triangles = []
-        for i, center in enumerate(triangle_centers):
-            center_np = np.array(center)
-            # 对于球面，检查点到原点的距离
-            center_dist = np.linalg.norm(center_np)
-            if center_dist > 0.95 and center_dist < 1.05:  # 只保留球面表面的三角形
-                filtered_triangles.append(mesh.triangles[i])
-        
-        # 创建新的网格
-        if filtered_triangles:
-            new_mesh = o3d.geometry.TriangleMesh()
-            new_mesh.vertices = mesh.vertices
-            new_mesh.triangles = o3d.utility.Vector3iVector(filtered_triangles)
-            new_mesh.compute_vertex_normals()
-            mesh = new_mesh
-        else:
-            mesh.compute_vertex_normals()
-    
-    # 清理网格
-    # 移除重复顶点
-    mesh.remove_duplicated_vertices()
-    # 移除重复三角形
-    mesh.remove_duplicated_triangles()
-    # 移除非流形边
-    mesh.remove_non_manifold_edges()
-    
-    print(f"最终网格: {len(mesh.vertices)} 个顶点, {len(mesh.triangles)} 个三角形")
-    return mesh
+    return normals, gaussian_curvatures, principal_curvatures
 
 
 def run_test():
@@ -175,15 +117,15 @@ def run_test():
     
     # 1. 创建球面点云
     print("1. 创建球面点云...")
-    points, normals, gaussian_curvatures, principal_curvatures = create_sphere_points(
+    # 使用参数方程直接生成球面网格
+    mesh, vertex_params = create_sphere_mesh(
         radius=1.0, 
-        resolution=30
+        resolution=95
     )
-    print(f"采样完成，得到 {len(points)} 个点")
+    print(f"采样完成，得到 {len(mesh.vertices)} 个点")
     
     # 2. 创建网格
     print("2. 创建网格...")
-    mesh = create_mesh_from_points(points)
     print(f"网格创建完成: {len(mesh.vertices)} 个顶点, {len(mesh.triangles)} 个三角形")
     
     # 3. 创建网格处理器
@@ -192,28 +134,14 @@ def run_test():
     
     # 4. 添加几何特性
     print("4. 添加几何特性...")
-    # 为所有网格顶点计算几何特性
-    mesh_vertices = np.asarray(mesh.vertices)
-    vertex_normals = []
-    gaussian_curvatures = []
-    principal_curvatures = []
+    # 使用解析方法计算几何特性
+    normals, gaussian_curvatures, principal_curvatures = compute_sphere_properties(
+        mesh, vertex_params, radius=1.0
+    )
     
-    for vertex in mesh_vertices:
-        # 计算球面上点的法向量（指向径向）
-        normal = vertex / np.linalg.norm(vertex)
-        
-        # 球面的高斯曲率和主曲率（解析解）
-        K = 1 / (1.0**2)  # 高斯曲率
-        k1 = 1 / 1.0  # 主曲率1
-        k2 = 1 / 1.0  # 主曲率2
-        
-        vertex_normals.append(normal)
-        gaussian_curvatures.append(K)
-        principal_curvatures.append([k1, k2])
-    
-    mesh_processor.vertex_normals = np.array(vertex_normals)
-    mesh_processor.gaussian_curvatures = np.array(gaussian_curvatures)
-    mesh_processor.principal_curvatures = np.array(principal_curvatures)
+    mesh_processor.vertex_normals = normals
+    mesh_processor.gaussian_curvatures = gaussian_curvatures
+    mesh_processor.principal_curvatures = principal_curvatures
     
     # 5. 创建刀具
     print("5. 创建刀具...")
@@ -289,7 +217,7 @@ def run_test():
     
     # 12. 验证结果
     print("12. 验证结果...")
-    print(f"- 点云数量: {len(points)}")
+    print(f"- 点云数量: {len(mesh.vertices)}")
     print(f"- 网格顶点数: {len(mesh.vertices)}")
     print(f"- 分区数量: {num_partitions}")
     print(f"- 刀具路径数: {len(tool_paths['paths'])}")
@@ -301,9 +229,9 @@ def run_test():
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    # 保存点云
+    # 保存点云（从网格顶点生成）
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.points = o3d.utility.Vector3dVector(np.asarray(mesh.vertices))
     pcd.normals = o3d.utility.Vector3dVector(normals)
     o3d.io.write_point_cloud(os.path.join(output_dir, "sphere_points.ply"), pcd)
     
