@@ -315,7 +315,7 @@ class ResultVisualizer:
         vis.create_window(window_name="刀具路径可视化")
         
         # 添加坐标系
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=5.0)
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
         vis.add_geometry(coord_frame)
         
         # 加载所有路径
@@ -716,12 +716,12 @@ class ResultVisualizer:
             vis.create_window(window_name="3D刀具方向场可视化")
             
             # 添加坐标系
-            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=5.0)
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
             vis.add_geometry(coord_frame)
             
             # 创建箭头列表
             arrows = []
-            scale = 0.5  # 箭头缩放
+            scale = 0.1  # 箭头缩放
             
             print("创建箭头...")
             for i, (vertex, orientation) in enumerate(zip(sampled_vertices, sampled_orientations)):
@@ -733,10 +733,10 @@ class ResultVisualizer:
                 
                 # 创建箭头
                 arrow = o3d.geometry.TriangleMesh.create_arrow(
-                    cylinder_radius=scale * 0.1,
-                    cone_radius=scale * 0.2,
-                    cylinder_height=scale * 0.5,
-                    cone_height=scale * 0.3
+                    cylinder_radius=scale * 0.2,
+                    cone_radius=scale * 0.4,
+                    cylinder_height=scale * 0.6,
+                    cone_height=scale * 0.4
                 )
                 
                 # 计算旋转矩阵
@@ -819,7 +819,7 @@ class ResultVisualizer:
         vis.create_window(window_name="边缘拟合点可视化")
         
         # 添加坐标系
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=5.0)
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
         vis.add_geometry(coord_frame)
         
         # 不显示原始边缘点，只显示中间边缘点
@@ -915,7 +915,7 @@ class ResultVisualizer:
         vis.create_window(window_name="刀具路径可视化 (从CSV加载)")
         
         # 添加坐标系
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=5.0)
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
         vis.add_geometry(coord_frame)
         
         # 加载所有路径

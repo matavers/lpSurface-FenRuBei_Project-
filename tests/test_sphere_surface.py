@@ -1,4 +1,4 @@
-"""
+﻿"""
 测试球面
 通过参数方程直接采样点云，并使用解析公式计算几何特性
 """
@@ -173,21 +173,12 @@ def run_test():
     
     # 9. 生成刀具路径
     print("9. 生成刀具路径...")
-    # 生成简单的等值线
-    iso_curves = []
-    unique_labels = np.unique(labels)
-    for label in unique_labels:
-        partition_vertices = np.where(labels == label)[0]
-        if len(partition_vertices) > 3:
-            curve = []
-            for i in range(0, len(partition_vertices), 5):
-                vertex_idx = partition_vertices[i]
-                curve.append(mesh_processor.vertices[vertex_idx])
-            if len(curve) > 1:
-                iso_curves.append(curve)
-    
-    # 使用顶点法向量作为工具方向
+    # 生成简    # 使用IsoScallopFieldGenerator生成标量场并提取真正的等距线
+    from core.isoScallopField import IsoScallopFieldGenerator
     tool_orientations = mesh_processor.vertex_normals
+    iso_field = IsoScallopFieldGenerator(mesh_processor, tool_orientations, tool, scallop_height=0.4)
+    scalar_field = iso_field.generate_scalar_field()
+    iso_curves = iso_field.extract_iso_curves(scalar_field, spacing=0.05)
     
     # 创建路径生成器
     path_generator = PathGenerator(mesh_processor, iso_curves, tool_orientations, tool)

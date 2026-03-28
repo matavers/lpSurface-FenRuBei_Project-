@@ -275,45 +275,82 @@ def run_test():
         print(f"分区耗时: {partition_time:.2f}秒")
         print(f"边缘中点数量: {len(edge_midpoints)}")
         
-        # 8. 生成刀具路径
+        # 8. 生成刀具路径（简化示例）
         print("8. 生成刀具路径...")
+        # 简化处理：使用默认的刀具方向和模拟刀具路径
+        tool_orientations = mesh_processor.vertex_normals
         
-        # 8.1 生成刀具方向场
-        print("   8.1 生成刀具方向场...")
-        from core.toolOrientationField import ToolOrientationField
-        orientation_field = ToolOrientationField(
-            mesh_processor,
-            labels,
-            tool
-        )
-        tool_orientations = orientation_field.generate_field()
+        # 模拟刀具路径 - 生成沿圆锥表面的螺旋路径
+        tool_paths = {
+            'paths': []
+        }
         
-        # 8.2 生成等残留高度场
-        print("   8.2 生成等残留高度场...")
-        from core.isoScallopField import IsoScallopFieldGenerator
-        iso_scallop_generator = IsoScallopFieldGenerator(
-            mesh_processor,
-            tool_orientations,
-            tool,
-            scallop_height=0.05  # 设置残留高度
-        )
-        scalar_field = iso_scallop_generator.generate_scalar_field()
+        # 生成沿圆锥表面的螺旋路径
+        # 计算圆锥的参数范围
+        vertices = np.asarray(mesh.vertices)
+        z_min = np.min(vertices[:, 2])
+        z_max = np.max(vertices[:, 2])
+        height = z_max - z_min
         
-        # 8.3 提取等值线
-        print("   8.3 提取等值线...")
-        iso_curves = iso_scallop_generator.extract_iso_curves(scalar_field)
+        # 生成螺旋路径
+        num_turns = 5  # 螺旋圈数
+        num_points = 100  # 每个路径的点数
+        radius = 1.0  # 底面半径
         
-        # 8.4 使用PathGenerator生成最终刀具路径
-        print("   8.4 使用PathGenerator生成刀具路径...")
-        path_generator = PathGenerator(
-            mesh_processor,
-            iso_curves,
-            tool_orientations,
-            tool
-        )
-        tool_paths = path_generator.generate_final_path()
+        path_points = []
+        for i in range(num_points):
+            # 沿着高度方向移动
+            t = i / (num_points - 1)  # 0到1之间
+            z = z_min + t * height
+            
+            # 计算当前高度的半径（圆锥从底面到顶点半径线性减小）
+            current_radius = radius * (1 - t)
+            
+            # 计算角度（随高度增加而增加，形成螺旋）
+            angle = 2 * np.pi * num_turns * t
+            
+            # 计算坐标
+            x = current_radius * np.cos(angle)
+            y = current_radius * np.sin(angle)
+            
+            path_points.append(np.array([x, y, z]))
         
-        print(f"   生成了 {len(tool_paths['paths'])} 条刀具路径")
+        # 添加螺旋路径
+        path = {
+            'points': path_points,
+            'type': 'machining'
+        }
+        tool_paths['paths'].append(path)
+        
+        # 为每个分区生成一条路径（可选）
+        # unique_labels = np.unique(labels)
+        # for label in unique_labels:
+        #     # 找到该分区的顶点
+        #     partition_vertices = vertices[labels == label]
+        #     if len(partition_vertices) > 0:
+        #         # 生成沿分区高度方向的直线路径
+        #         path_points = []
+        #         # 找到分区的最小和最大z值
+        #         z_part_min = np.min(partition_vertices[:, 2])
+        #         z_part_max = np.max(partition_vertices[:, 2])
+        #         # 生成沿z轴的路径
+        #         num_points = 20
+        #         for i in range(num_points):
+        #             t = i / (num_points - 1)
+        #             z = z_part_min + t * (z_part_max - z_part_min)
+        #             # 找到该高度处的平均x,y坐标
+        #             slice_vertices = partition_vertices[(partition_vertices[:, 2] >= z - 0.05) & (partition_vertices[:, 2] <= z + 0.05)]
+        #             if len(slice_vertices) > 0:
+        #                 x = np.mean(slice_vertices[:, 0])
+        #                 y = np.mean(slice_vertices[:, 1])
+        #                 path_points.append(np.array([x, y, z]))
+        #         
+        #         if len(path_points) > 1:
+        #             path = {
+        #                 'points': path_points,
+        #                 'type': 'machining'
+        #             }
+        #             tool_paths['paths'].append(path)
         
         # 9. 计算路径总长度
         total_length = 0
@@ -332,7 +369,7 @@ def run_test():
         visualizer.visualize_partitions_with_midpoints(mesh, labels, edge_midpoints)
         
         # 可视化刀具方向场
-        visualizer.visualize_tool_orientations(mesh, tool_orientations, scale=0.05)
+        visualizer.visualize_tool_orientations(mesh, tool_orientations, scale=0.1)
         
         # 可视化刀具路径
         visualizer.visualize_tool_paths(tool_paths['paths'])
@@ -347,10 +384,8 @@ def run_test():
         
         # 12. 保存结果
         print("12. 保存结果...")
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         symmetry_str = "_" + "_".join(symmetry_types) if symmetry_types else "_no_symmetry"
-        output_dir = os.path.join("output", f"test_cone{symmetry_str}_{timestamp}")
+        output_dir = os.path.join("output", f"test_cone{symmetry_str}")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
@@ -389,29 +424,10 @@ def run_test():
             
             # 处理方向，确保是列表格式
             orientations = path_data.get('orientations', [])
-            # 检查orientations是否有效
-            if orientations is not None:
-                # 检查是否是numpy数组
-                if isinstance(orientations, np.ndarray):
-                    # 如果是二维数组且不为空，转换为列表
-                    if len(orientations.shape) == 2 and orientations.size > 0:
-                        orientations_list = orientations.tolist()
-                    else:
-                        orientations_list = []
-                else:
-                    # 非numpy数组情况
-                    try:
-                        if orientations and isinstance(orientations[0], np.ndarray):
-                            # 如果是numpy数组列表
-                            orientations_list = [orientation.tolist() for orientation in orientations]
-                        else:
-                            # 其他情况
-                            orientations_list = orientations
-                    except:
-                        # 处理可能的索引错误
-                        orientations_list = []
+            if orientations and isinstance(orientations[0], np.ndarray):
+                orientations_list = [orientation.tolist() for orientation in orientations]
             else:
-                orientations_list = []
+                orientations_list = orientations
             
             tool_paths_json['paths'].append({
                 'points': points_list,

@@ -7,13 +7,15 @@ import numpy as np
 from typing import List, Tuple, Dict, Any
 import networkx as nx
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from scipy.spatial import cKDTree
+import time
 
 from .meshProcessor import MeshProcessor
 from .indicatorCalculator import IndicatorCalculator
 
 
 class AdvancedSurfacePartitioner:
-    def __init__(self, mesh: MeshProcessor, tool, resolution=0.1, alpha=0.3, global_field='rolled_error'):
+    def __init__(self, mesh: MeshProcessor, tool, resolution=0.1, alpha=0.3, global_field='rolled_error', symmetry_types=None):
         """
         初始化高级表面分区器
         Args:
@@ -22,6 +24,7 @@ class AdvancedSurfacePartitioner:
             resolution: 聚类分辨率参数，控制分区数量
             alpha: 全局引导强度参数，范围[0,1]
             global_field: 全局场类型，可选值：'rolled_error', 'curvature', 'cutting_width'
+            symmetry_types: 对称性类型列表，可选值：'rotation', 'translation', 'reflection', 'helical', 'combined'
         """
         self.mesh = mesh
         self.tool = tool
@@ -29,6 +32,7 @@ class AdvancedSurfacePartitioner:
         self.resolution = resolution
         self.alpha = alpha
         self.global_field = global_field
+        self.symmetry_types = symmetry_types
         
         # 初始化指标计算器
         self.indicator_calculator = IndicatorCalculator(mesh, tool)
@@ -461,41 +465,88 @@ class AdvancedSurfacePartitioner:
         """
         print("开始表面分区...")
         
-        # 1. 构建加权邻接矩阵
-        adjacency_matrix = self._build_weighted_adjacency_matrix()
-        
-        # 2. 执行聚类
-        if clustering_method == 'spectral':
-            # 执行谱聚类
-            labels = self._spectral_clustering(adjacency_matrix)
-        elif clustering_method == 'alternative':
-            # 执行备用聚类
-            G = nx.Graph()
-            G.add_nodes_from(range(self.num_vertices))
-            for i in range(self.num_vertices):
-                for j in range(i+1, self.num_vertices):
-                    if adjacency_matrix[i, j] > 0:
-                        G.add_edge(i, j, weight=adjacency_matrix[i, j])
-            labels = self._alternative_clustering(G)
+        # 检查是否指定了对称性
+        if self.symmetry_types is not None and len(self.symmetry_types) > 0:
+            # 使用基于对称性的分区方法
+            print("使用基于对称性的分区方法")
+            
+            # 检测对称性
+            symmetries = self._detect_all_symmetries()
+            
+            if symmetries:
+                # 基于对称性生成分区
+                labels = self._partition_by_symmetry(symmetries)
+            else:
+                # 未检测到对称性，回退到原有方法
+                print("未检测到对称性，回退到原有分区方法")
+                # 1. 构建加权邻接矩阵
+                adjacency_matrix = self._build_weighted_adjacency_matrix()
+                
+                # 2. 执行聚类
+                if clustering_method == 'spectral':
+                    # 执行谱聚类
+                    labels = self._spectral_clustering(adjacency_matrix)
+                elif clustering_method == 'alternative':
+                    # 执行备用聚类
+                    G = nx.Graph()
+                    G.add_nodes_from(range(self.num_vertices))
+                    for i in range(self.num_vertices):
+                        for j in range(i+1, self.num_vertices):
+                            if adjacency_matrix[i, j] > 0:
+                                G.add_edge(i, j, weight=adjacency_matrix[i, j])
+                    labels = self._alternative_clustering(G)
+                else:
+                    # 执行Leiden聚类
+                    labels = self._leiden_clustering(adjacency_matrix)
+                
+                # 3. 应用对称性约束
+                labels = self._apply_symmetry_constraints(labels)
+                
+                # 4. 确保分区连通性
+                labels = self._ensure_connectivity(labels)
+                
+                # 5. 重新编号标签为连续的整数
+                unique_labels = np.unique(labels)
+                label_map = {old: new for new, old in enumerate(unique_labels)}
+                labels = np.array([label_map[l] for l in labels])
         else:
-            # 执行Leiden聚类
-            labels = self._leiden_clustering(adjacency_matrix)
+            # 使用原有分区方法
+            print("使用原有分区方法")
+            # 1. 构建加权邻接矩阵
+            adjacency_matrix = self._build_weighted_adjacency_matrix()
+            
+            # 2. 执行聚类
+            if clustering_method == 'spectral':
+                # 执行谱聚类
+                labels = self._spectral_clustering(adjacency_matrix)
+            elif clustering_method == 'alternative':
+                # 执行备用聚类
+                G = nx.Graph()
+                G.add_nodes_from(range(self.num_vertices))
+                for i in range(self.num_vertices):
+                    for j in range(i+1, self.num_vertices):
+                        if adjacency_matrix[i, j] > 0:
+                            G.add_edge(i, j, weight=adjacency_matrix[i, j])
+                labels = self._alternative_clustering(G)
+            else:
+                # 执行Leiden聚类
+                labels = self._leiden_clustering(adjacency_matrix)
+            
+            # 3. 应用对称性约束
+            labels = self._apply_symmetry_constraints(labels)
+            
+            # 4. 确保分区连通性
+            labels = self._ensure_connectivity(labels)
+            
+            # 5. 重新编号标签为连续的整数
+            unique_labels = np.unique(labels)
+            label_map = {old: new for new, old in enumerate(unique_labels)}
+            labels = np.array([label_map[l] for l in labels])
         
-        # 3. 应用对称性约束
-        labels = self._apply_symmetry_constraints(labels)
-        
-        # 4. 确保分区连通性
-        labels = self._ensure_connectivity(labels)
-        
-        # 6. 重新编号标签为连续的整数
-        unique_labels = np.unique(labels)
-        label_map = {old: new for new, old in enumerate(unique_labels)}
-        labels = np.array([label_map[l] for l in labels])
-        
-        # 7. 提取中点边缘
+        # 提取中点边缘
         edge_midpoints = self._extract_edge_midpoints(labels)
         
-        print(f"分区完成: {len(unique_labels)} 个分区")
+        print(f"分区完成: {len(np.unique(labels))} 个分区")
         
         return labels, edge_midpoints
 
@@ -526,6 +577,460 @@ class AdvancedSurfacePartitioner:
         
         print(f"对称性检测完成: 球面={is_spherical}")
         return symmetry_info
+    
+    def _detect_rotational_symmetry(self) -> Dict[str, Any]:
+        """
+        检测旋转对称性
+        Returns:
+            旋转对称信息字典
+        """
+        print("检测旋转对称性...")
+        start_time = time.time()
+        
+        vertices = self.mesh.vertices
+        n = len(vertices)
+        
+        print(f"  顶点数量: {n}")
+        
+        # 构建KD树加速最近邻搜索
+        print("  构建KD树...")
+        kdtree = cKDTree(vertices)
+        
+        # 计算平均边长
+        avg_edge_length = self._calculate_avg_edge_length()
+        epsilon = 1.5 * avg_edge_length
+        print(f"  平均边长: {avg_edge_length:.4f}, epsilon: {epsilon:.4f}")
+        
+        best_axis = None
+        best_center = None
+        best_n = 0
+        best_inliers = []
+        best_score = 0
+        
+        # 生成候选轴
+        print("  生成候选轴...")
+        candidate_axes = []
+        
+        # 方法1: 使用PCA
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=3)
+        pca.fit(vertices)
+        candidate_axes.append(pca.components_[-1])  # 最小特征值对应的轴
+        print(f"  PCA轴: {pca.components_[-1]}")
+        
+        # 方法2: 随机采样点对 (减少采样数量)
+        Naxis = min(50, n)  # 减少候选轴数量
+        for _ in range(Naxis):
+            if n >= 2:
+                i, j = np.random.choice(n, 2, replace=False)
+                axis = vertices[j] - vertices[i]
+                if np.linalg.norm(axis) > 0:
+                    axis = axis / np.linalg.norm(axis)
+                    candidate_axes.append(axis)
+        
+        print(f"  候选轴数量: {len(candidate_axes)}")
+        
+        # RANSAC主循环 - 减少迭代次数
+        max_iterations = 50  # 减少迭代次数
+        total_iterations = len(candidate_axes) * max_iterations
+        current_iteration = 0
+        
+        print(f"  开始RANSAC迭代 (总迭代次数: {total_iterations})...")
+        
+        for axis_idx, axis in enumerate(candidate_axes):
+            if axis_idx % 10 == 0:
+                print(f"  处理候选轴 {axis_idx + 1}/{len(candidate_axes)}...")
+            
+            for iter_idx in range(max_iterations):
+                current_iteration += 1
+                if current_iteration % 100 == 0:
+                    elapsed = time.time() - start_time
+                    print(f"  进度: {current_iteration}/{total_iterations} ({elapsed:.1f}秒)")
+                
+                if n >= 2:
+                    # 随机选择两个点
+                    i, j = np.random.choice(n, 2, replace=False)
+                    p, q = vertices[i], vertices[j]
+                    
+                    # 计算旋转角度
+                    # 投影到垂直于轴的平面
+                    def project(v):
+                        return v - np.dot(v, axis) * axis
+                    
+                    p_proj = project(p)
+                    q_proj = project(q)
+                    
+                    if np.linalg.norm(p_proj) > 1e-8 and np.linalg.norm(q_proj) > 1e-8:
+                        # 计算极角
+                        angle_p = np.arctan2(p_proj[1], p_proj[0])
+                        angle_q = np.arctan2(q_proj[1], q_proj[0])
+                        phi = abs(angle_q - angle_p)
+                        if phi > np.pi:
+                            phi = 2 * np.pi - phi
+                        
+                        # 估计阶数n
+                        if phi > 1e-8:
+                            estimated_n = round(2 * np.pi / phi)
+                            estimated_n = max(2, min(12, estimated_n))  # 限制阶数范围
+                            phi = 2 * np.pi / estimated_n
+                        else:
+                            continue
+                        
+                        # 批量旋转所有点并使用KD树查找最近邻
+                        inliers = []
+                        rotated_points = np.array([self._rotate_point(v, axis, phi) for v in vertices])
+                        
+                        # 使用KD树批量查询最近邻
+                        distances, indices = kdtree.query(rotated_points, k=1)
+                        inliers = np.where(distances < epsilon)[0].tolist()
+                        
+                        # 计算分数
+                        score = len(inliers) / n
+                        if score > best_score:
+                            best_score = score
+                            best_axis = axis
+                            best_n = estimated_n
+                            best_inliers = inliers
+        
+        elapsed = time.time() - start_time
+        print(f"  RANSAC完成，耗时: {elapsed:.2f}秒")
+        
+        if best_score > 0.6:  # 内点比例阈值
+            print(f"检测到旋转对称性: 轴={best_axis}, 阶数={best_n}, 内点比例={best_score:.3f}")
+            return {
+                'type': 'rotation',
+                'axis': best_axis,
+                'center': np.mean(vertices[best_inliers], axis=0),
+                'n': best_n,
+                'inliers': best_inliers,
+                'score': best_score
+            }
+        else:
+            print("未检测到旋转对称性")
+            return None
+    
+    def _detect_translational_symmetry(self) -> Dict[str, Any]:
+        """
+        检测平移对称性
+        Returns:
+            平移对称信息字典
+        """
+        print("检测平移对称性...")
+        start_time = time.time()
+        
+        vertices = self.mesh.vertices
+        n = len(vertices)
+        
+        print(f"  顶点数量: {n}")
+        
+        # 构建KD树加速最近邻搜索
+        print("  构建KD树...")
+        kdtree = cKDTree(vertices)
+        
+        # 计算平均边长
+        avg_edge_length = self._calculate_avg_edge_length()
+        epsilon = 1.5 * avg_edge_length
+        print(f"  平均边长: {avg_edge_length:.4f}, epsilon: {epsilon:.4f}")
+        
+        best_translation = None
+        best_inliers = []
+        best_score = 0
+        
+        # 生成候选平移向量 (减少采样数量)
+        print("  生成候选平移向量...")
+        candidate_translations = []
+        
+        # 采样点对
+        Nsamples = min(100, n)  # 减少采样数量
+        for _ in range(Nsamples):
+            if n >= 2:
+                i, j = np.random.choice(n, 2, replace=False)
+                t = vertices[j] - vertices[i]
+                if np.linalg.norm(t) > avg_edge_length:  # 过滤过小的向量
+                    candidate_translations.append(t)
+        
+        print(f"  候选平移向量数量: {len(candidate_translations)}")
+        
+        # RANSAC主循环
+        print(f"  开始RANSAC迭代...")
+        for idx, t in enumerate(candidate_translations):
+            if idx % 20 == 0:
+                print(f"  处理候选向量 {idx + 1}/{len(candidate_translations)}...")
+            
+            # 批量平移所有点并使用KD树查找最近邻
+            translated_points = vertices + t
+            distances, indices = kdtree.query(translated_points, k=1)
+            inliers = np.where(distances < epsilon)[0].tolist()
+            
+            score = len(inliers) / n
+            if score > best_score:
+                best_score = score
+                best_translation = t
+                best_inliers = inliers
+        
+        elapsed = time.time() - start_time
+        print(f"  RANSAC完成，耗时: {elapsed:.2f}秒")
+        
+        if best_score > 0.6:  # 内点比例阈值
+            print(f"检测到平移对称性: 向量={best_translation}, 内点比例={best_score:.3f}")
+            return {
+                'type': 'translation',
+                'vector': best_translation,
+                'inliers': best_inliers,
+                'score': best_score
+            }
+        else:
+            print("未检测到平移对称性")
+            return None
+    
+    def _detect_reflection_symmetry(self) -> Dict[str, Any]:
+        """
+        检测反射对称性
+        Returns:
+            反射对称信息字典
+        """
+        print("检测反射对称性...")
+        start_time = time.time()
+        
+        vertices = self.mesh.vertices
+        n = len(vertices)
+        
+        print(f"  顶点数量: {n}")
+        
+        # 构建KD树加速最近邻搜索
+        print("  构建KD树...")
+        kdtree = cKDTree(vertices)
+        
+        # 计算平均边长
+        avg_edge_length = self._calculate_avg_edge_length()
+        epsilon = 1.5 * avg_edge_length
+        print(f"  平均边长: {avg_edge_length:.4f}, epsilon: {epsilon:.4f}")
+        
+        best_normal = None
+        best_d = 0
+        best_inliers = []
+        best_score = 0
+        
+        # 生成候选平面
+        print("  生成候选平面法向...")
+        candidate_normals = []
+        
+        # 方法1: 使用PCA
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=3)
+        pca.fit(vertices)
+        candidate_normals.append(pca.components_[-1])  # 最小特征值对应的法向
+        print(f"  PCA法向: {pca.components_[-1]}")
+        
+        # 方法2: 随机采样三个点 (减少采样数量)
+        Nsamples = min(100, n)  # 减少采样数量
+        for _ in range(Nsamples):
+            if n >= 3:
+                indices = np.random.choice(n, 3, replace=False)
+                p1, p2, p3 = vertices[indices]
+                # 计算平面法向
+                v1 = p2 - p1
+                v2 = p3 - p1
+                normal = np.cross(v1, v2)
+                if np.linalg.norm(normal) > 0:
+                    normal = normal / np.linalg.norm(normal)
+                    candidate_normals.append(normal)
+        
+        print(f"  候选法向数量: {len(candidate_normals)}")
+        
+        # RANSAC主循环
+        print(f"  开始RANSAC迭代...")
+        for idx, normal in enumerate(candidate_normals):
+            if idx % 20 == 0:
+                print(f"  处理候选法向 {idx + 1}/{len(candidate_normals)}...")
+            
+            # 计算平面偏移d（使用点云中位数）
+            projections = np.dot(vertices, normal)
+            d = np.median(projections)
+            
+            # 批量计算反射点并使用KD树查找最近邻
+            reflected_points = vertices - 2 * (projections - d)[:, np.newaxis] * normal
+            distances, indices = kdtree.query(reflected_points, k=1)
+            inliers = np.where(distances < epsilon)[0].tolist()
+            
+            score = len(inliers) / n
+            if score > best_score:
+                best_score = score
+                best_normal = normal
+                best_d = d
+                best_inliers = inliers
+        
+        elapsed = time.time() - start_time
+        print(f"  RANSAC完成，耗时: {elapsed:.2f}秒")
+        
+        if best_score > 0.6:  # 内点比例阈值
+            print(f"检测到反射对称性: 法向={best_normal}, 偏移={best_d}, 内点比例={best_score:.3f}")
+            return {
+                'type': 'reflection',
+                'normal': best_normal,
+                'd': best_d,
+                'inliers': best_inliers,
+                'score': best_score
+            }
+        else:
+            print("未检测到反射对称性")
+            return None
+    
+    def _detect_helical_symmetry(self) -> Dict[str, Any]:
+        """
+        检测螺旋对称性
+        Returns:
+            螺旋对称信息字典
+        """
+        print("检测螺旋对称性...")
+        start_time = time.time()
+        
+        # 首先检测旋转轴
+        rotation_info = self._detect_rotational_symmetry()
+        if not rotation_info:
+            print("未检测到螺旋对称性（无旋转轴）")
+            return None
+        
+        axis = rotation_info['axis']
+        center = rotation_info['center']
+        vertices = self.mesh.vertices
+        n = len(vertices)
+        
+        print(f"  顶点数量: {n}")
+        
+        # 构建KD树加速最近邻搜索
+        print("  构建KD树...")
+        kdtree = cKDTree(vertices)
+        
+        # 沿轴分析
+        print("  计算投影和角度...")
+        # 投影到轴上
+        projections = np.dot(vertices - center, axis)
+        
+        # 计算绕轴的角度
+        angles = []
+        for v in vertices:
+            v_rel = v - center
+            # 投影到垂直于轴的平面
+            v_proj = v_rel - np.dot(v_rel, axis) * axis
+            if np.linalg.norm(v_proj) > 1e-8:
+                angle = np.arctan2(v_proj[1], v_proj[0])
+                angles.append(angle)
+            else:
+                angles.append(0)
+        
+        # 寻找线性关系 angle = k * t + angle0
+        # 使用最小二乘法
+        from sklearn.linear_model import LinearRegression
+        X = projections.reshape(-1, 1)
+        y = np.array(angles)
+        
+        model = LinearRegression()
+        model.fit(X, y)
+        k = model.coef_[0]
+        angle0 = model.intercept_
+        
+        print(f"  线性回归结果: k={k:.6f}, angle0={angle0:.3f}")
+        
+        # 计算平移量h和旋转角theta
+        if abs(k) > 1e-8:
+            h = 2 * np.pi / abs(k)
+            theta = 2 * np.pi / rotation_info['n']
+        else:
+            print("未检测到螺旋对称性（无平移分量）")
+            return None
+        
+        print(f"  计算参数: h={h:.3f}, theta={theta:.3f}")
+        
+        # 验证 - 使用KD树批量查询
+        avg_edge_length = self._calculate_avg_edge_length()
+        epsilon = 1.5 * avg_edge_length
+        
+        print("  验证螺旋对称性...")
+        # 批量计算螺旋变换后的点
+        helical_points = []
+        for v in vertices:
+            v_rotated = self._rotate_point(v - center, axis, theta) + center
+            v_helical = v_rotated + h * axis
+            helical_points.append(v_helical)
+        helical_points = np.array(helical_points)
+        
+        # 使用KD树批量查询最近邻
+        distances, indices = kdtree.query(helical_points, k=1)
+        inliers = np.where(distances < epsilon)[0].tolist()
+        
+        score = len(inliers) / n
+        
+        elapsed = time.time() - start_time
+        print(f"  螺旋对称性检测完成，耗时: {elapsed:.2f}秒")
+        
+        if score > 0.6:  # 内点比例阈值
+            print(f"检测到螺旋对称性: 轴={axis}, 旋转角={theta:.3f}, 平移量={h:.3f}, 内点比例={score:.3f}")
+            return {
+                'type': 'helical',
+                'axis': axis,
+                'center': center,
+                'theta': theta,
+                'h': h,
+                'inliers': inliers,
+                'score': score
+            }
+        else:
+            print("未检测到螺旋对称性")
+            return None
+    
+    def _calculate_avg_edge_length(self) -> float:
+        """
+        计算网格的平均边长
+        Returns:
+            平均边长
+        """
+        total_length = 0
+        edge_count = 0
+        vertices = self.mesh.vertices
+        
+        for v in range(self.num_vertices):
+            neighbors = self.mesh.adjacency[v]
+            for neighbor in neighbors:
+                if v < neighbor:  # 避免重复计算
+                    length = np.linalg.norm(vertices[v] - vertices[neighbor])
+                    total_length += length
+                    edge_count += 1
+        
+        if edge_count > 0:
+            return total_length / edge_count
+        else:
+            return 0.1  # 默认值
+    
+    def _rotate_point(self, point: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+        """
+        绕轴旋转点
+        Args:
+            point: 点坐标
+            axis: 旋转轴（单位向量）
+            angle: 旋转角度（弧度）
+        Returns:
+            旋转后的点
+        """
+        # 使用罗德里格斯旋转公式
+        axis = axis / np.linalg.norm(axis)
+        cos_theta = np.cos(angle)
+        sin_theta = np.sin(angle)
+        
+        # 计算旋转矩阵
+        R = np.array([
+            [cos_theta + axis[0]**2 * (1 - cos_theta),
+             axis[0] * axis[1] * (1 - cos_theta) - axis[2] * sin_theta,
+             axis[0] * axis[2] * (1 - cos_theta) + axis[1] * sin_theta],
+            [axis[1] * axis[0] * (1 - cos_theta) + axis[2] * sin_theta,
+             cos_theta + axis[1]**2 * (1 - cos_theta),
+             axis[1] * axis[2] * (1 - cos_theta) - axis[0] * sin_theta],
+            [axis[2] * axis[0] * (1 - cos_theta) - axis[1] * sin_theta,
+             axis[2] * axis[1] * (1 - cos_theta) + axis[0] * sin_theta,
+             cos_theta + axis[2]**2 * (1 - cos_theta)]
+        ])
+        
+        return R @ point
 
     def _apply_symmetry_constraints(self, labels: np.ndarray) -> np.ndarray:
         """
@@ -564,6 +1069,307 @@ class AdvancedSurfacePartitioner:
         
         print("对称性约束应用完成")
         return symmetric_labels
+    
+    def _detect_all_symmetries(self) -> List[Dict[str, Any]]:
+        """
+        检测所有指定类型的对称性
+        Returns:
+            对称性信息列表
+        """
+        print("\n" + "="*60)
+        print("检测所有指定类型的对称性...")
+        print("="*60)
+        start_time = time.time()
+        
+        symmetries = []
+        
+        if self.symmetry_types is None:
+            print("未指定对称性类型，跳过检测")
+            return symmetries
+        
+        print(f"指定的对称性类型: {self.symmetry_types}")
+        
+        # 检测旋转对称性
+        if 'rotation' in self.symmetry_types:
+            print("\n--- 检测旋转对称性 ---")
+            rotation_info = self._detect_rotational_symmetry()
+            if rotation_info:
+                symmetries.append(rotation_info)
+                print(f"  ✓ 检测到旋转对称性")
+            else:
+                print(f"  ✗ 未检测到旋转对称性")
+        
+        # 检测平移对称性
+        if 'translation' in self.symmetry_types:
+            print("\n--- 检测平移对称性 ---")
+            translation_info = self._detect_translational_symmetry()
+            if translation_info:
+                symmetries.append(translation_info)
+                print(f"  ✓ 检测到平移对称性")
+            else:
+                print(f"  ✗ 未检测到平移对称性")
+        
+        # 检测反射对称性
+        if 'reflection' in self.symmetry_types:
+            print("\n--- 检测反射对称性 ---")
+            reflection_info = self._detect_reflection_symmetry()
+            if reflection_info:
+                symmetries.append(reflection_info)
+                print(f"  ✓ 检测到反射对称性")
+            else:
+                print(f"  ✗ 未检测到反射对称性")
+        
+        # 检测螺旋对称性
+        if 'helical' in self.symmetry_types:
+            print("\n--- 检测螺旋对称性 ---")
+            helical_info = self._detect_helical_symmetry()
+            if helical_info:
+                symmetries.append(helical_info)
+                print(f"  ✓ 检测到螺旋对称性")
+            else:
+                print(f"  ✗ 未检测到螺旋对称性")
+        
+        # 检测组合对称性
+        if 'combined' in self.symmetry_types:
+            print("\n--- 检测组合对称性（检测所有类型）---")
+            # 检测所有类型
+            rotation_info = self._detect_rotational_symmetry()
+            if rotation_info:
+                symmetries.append(rotation_info)
+                print(f"  ✓ 检测到旋转对称性")
+            
+            translation_info = self._detect_translational_symmetry()
+            if translation_info:
+                symmetries.append(translation_info)
+                print(f"  ✓ 检测到平移对称性")
+            
+            reflection_info = self._detect_reflection_symmetry()
+            if reflection_info:
+                symmetries.append(reflection_info)
+                print(f"  ✓ 检测到反射对称性")
+            
+            helical_info = self._detect_helical_symmetry()
+            if helical_info:
+                symmetries.append(helical_info)
+                print(f"  ✓ 检测到螺旋对称性")
+        
+        elapsed = time.time() - start_time
+        print("\n" + "="*60)
+        print(f"对称性检测完成，找到 {len(symmetries)} 种对称性，总耗时: {elapsed:.2f}秒")
+        print("="*60)
+        return symmetries
+    
+    def _partition_by_symmetry(self, symmetries: List[Dict[str, Any]]) -> np.ndarray:
+        """
+        基于对称性生成分区
+        Args:
+            symmetries: 对称性信息列表
+        Returns:
+            分区标签数组
+        """
+        print("\n" + "="*60)
+        print("基于对称性生成分区...")
+        print("="*60)
+        start_time = time.time()
+        
+        vertices = self.mesh.vertices
+        n = len(vertices)
+        
+        print(f"顶点数量: {n}")
+        print(f"对称性数量: {len(symmetries)}")
+        
+        # 构建KD树加速最近邻搜索
+        print("构建KD树...")
+        kdtree = cKDTree(vertices)
+        
+        # 构建对称对应图
+        print("构建对称对应图...")
+        G = nx.Graph()
+        G.add_nodes_from(range(n))
+        
+        # 计算平均边长
+        avg_edge_length = self._calculate_avg_edge_length()
+        epsilon_match = 1.5 * avg_edge_length
+        print(f"平均边长: {avg_edge_length:.4f}, epsilon_match: {epsilon_match:.4f}")
+        
+        # 为每个变换添加边
+        for sym_idx, symmetry in enumerate(symmetries):
+            symmetry_type = symmetry['type']
+            print(f"\n处理对称性 {sym_idx + 1}/{len(symmetries)}: {symmetry_type}")
+            sym_start_time = time.time()
+            
+            if symmetry_type == 'rotation':
+                axis = symmetry['axis']
+                center = symmetry['center']
+                theta = 2 * np.pi / symmetry['n']
+                
+                print(f"  旋转轴: {axis}, 阶数: {symmetry['n']}, 角度: {theta:.3f}")
+                
+                # 批量旋转所有点
+                rotated_points = np.array([self._rotate_point(v - center, axis, theta) + center for v in vertices])
+                
+                # 使用KD树批量查询最近邻
+                distances, indices = kdtree.query(rotated_points, k=1)
+                valid_pairs = np.where(distances < epsilon_match)[0]
+                
+                for i in valid_pairs:
+                    G.add_edge(i, indices[i])
+                
+                print(f"  添加了 {len(valid_pairs)} 条边")
+            
+            elif symmetry_type == 'translation':
+                t = symmetry['vector']
+                
+                print(f"  平移向量: {t}")
+                
+                # 批量平移所有点
+                translated_points = vertices + t
+                
+                # 使用KD树批量查询最近邻
+                distances, indices = kdtree.query(translated_points, k=1)
+                valid_pairs = np.where(distances < epsilon_match)[0]
+                
+                for i in valid_pairs:
+                    G.add_edge(i, indices[i])
+                
+                print(f"  添加了 {len(valid_pairs)} 条边")
+            
+            elif symmetry_type == 'reflection':
+                normal = symmetry['normal']
+                d = symmetry['d']
+                
+                print(f"  反射平面法向: {normal}, 偏移: {d:.3f}")
+                
+                # 批量计算反射点
+                projections = np.dot(vertices, normal)
+                reflected_points = vertices - 2 * (projections - d)[:, np.newaxis] * normal
+                
+                # 使用KD树批量查询最近邻
+                distances, indices = kdtree.query(reflected_points, k=1)
+                valid_pairs = np.where(distances < epsilon_match)[0]
+                
+                for i in valid_pairs:
+                    G.add_edge(i, indices[i])
+                
+                print(f"  添加了 {len(valid_pairs)} 条边")
+            
+            elif symmetry_type == 'helical':
+                axis = symmetry['axis']
+                center = symmetry['center']
+                theta = symmetry['theta']
+                h = symmetry['h']
+                
+                print(f"  螺旋轴: {axis}, 旋转角: {theta:.3f}, 平移量: {h:.3f}")
+                
+                # 批量计算螺旋变换后的点
+                helical_points = np.array([
+                    self._rotate_point(v - center, axis, theta) + center + h * axis 
+                    for v in vertices
+                ])
+                
+                # 使用KD树批量查询最近邻
+                distances, indices = kdtree.query(helical_points, k=1)
+                valid_pairs = np.where(distances < epsilon_match)[0]
+                
+                for i in valid_pairs:
+                    G.add_edge(i, indices[i])
+                
+                print(f"  添加了 {len(valid_pairs)} 条边")
+            
+            sym_elapsed = time.time() - sym_start_time
+            print(f"  处理耗时: {sym_elapsed:.2f}秒")
+        
+        # 提取连通分量
+        print("\n提取连通分量...")
+        components = list(nx.connected_components(G))
+        print(f"找到 {len(components)} 个连通分量")
+        
+        # 为每个分量分配标签
+        labels = np.zeros(n, dtype=int)
+        for idx, component in enumerate(components):
+            for v in component:
+                labels[v] = idx
+        
+        # 合并小分量
+        print("合并小分量...")
+        min_component_size = max(1, int(n * 0.005))  # 最小分量大小
+        unique_labels = np.unique(labels)
+        
+        # 计算每个分量的几何特征
+        component_features = {}
+        for label in unique_labels:
+            component_vertices = np.where(labels == label)[0]
+            if len(component_vertices) > 0:
+                # 计算高斯曲率平均值
+                if hasattr(self.mesh, 'gaussian_curvatures'):
+                    avg_curvature = np.mean(self.mesh.gaussian_curvatures[component_vertices])
+                else:
+                    avg_curvature = 0
+                
+                # 计算平均位置
+                avg_position = np.mean(vertices[component_vertices], axis=0)
+                
+                component_features[label] = {
+                    'size': len(component_vertices),
+                    'avg_curvature': avg_curvature,
+                    'avg_position': avg_position
+                }
+        
+        # 合并小分量
+        merged_count = 0
+        for label in unique_labels:
+            if component_features[label]['size'] < min_component_size:
+                # 找到几何特征最相似的相邻分量
+                min_distance = float('inf')
+                nearest_label = -1
+                
+                # 找到该分量的所有相邻顶点
+                component_vertices = np.where(labels == label)[0]
+                neighbor_labels = set()
+                
+                for v in component_vertices:
+                    for neighbor in self.mesh.adjacency[v]:
+                        if labels[neighbor] != label:
+                            neighbor_labels.add(labels[neighbor])
+                
+                # 计算与相邻分量的几何相似性
+                for neighbor_label in neighbor_labels:
+                    if neighbor_label in component_features:
+                        # 计算曲率差异
+                        curvature_diff = abs(component_features[label]['avg_curvature'] - 
+                                           component_features[neighbor_label]['avg_curvature'])
+                        # 计算位置距离
+                        position_diff = np.linalg.norm(component_features[label]['avg_position'] - 
+                                                     component_features[neighbor_label]['avg_position'])
+                        # 综合距离
+                        distance = curvature_diff + position_diff
+                        
+                        if distance < min_distance:
+                            min_distance = distance
+                            nearest_label = neighbor_label
+                
+                # 合并到最近的分量
+                if nearest_label != -1:
+                    for v in component_vertices:
+                        labels[v] = nearest_label
+                    merged_count += 1
+        
+        print(f"合并了 {merged_count} 个小分量")
+        
+        # 确保分区连通性
+        print("确保分区连通性...")
+        labels = self._ensure_connectivity(labels)
+        
+        # 重新编号标签
+        unique_labels = np.unique(labels)
+        label_map = {old: new for new, old in enumerate(unique_labels)}
+        labels = np.array([label_map[l] for l in labels])
+        
+        elapsed = time.time() - start_time
+        print("\n" + "="*60)
+        print(f"基于对称性的分区完成: {len(unique_labels)} 个分区，总耗时: {elapsed:.2f}秒")
+        print("="*60)
+        return labels
 
     def _ensure_connectivity(self, labels: np.ndarray) -> np.ndarray:
         """
