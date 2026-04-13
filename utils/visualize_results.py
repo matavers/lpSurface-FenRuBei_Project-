@@ -340,7 +340,7 @@ class ResultVisualizer:
                 line_set.points = o3d.utility.Vector3dVector(points)
                 line_set.lines = o3d.utility.Vector2iVector(lines)
                 line_set.paint_uniform_color(color)
-                vis.add_geometry(line_set)
+                vis.addwwa_geometry(line_set)
         
         # 设置视角
         vis.run()
@@ -496,7 +496,7 @@ class ResultVisualizer:
             unique_labels = np.unique(partition_labels)
             num_labels = len(unique_labels)
             
-            print(f"创建 {num_labels} 个分区的颜色映射")
+            print(f"创建 {num_labels} 个分区的颜色映射") 
             
             # 创建颜色映射
             colors = plt.cm.jet(np.linspace(0, 1, num_labels))[:, :3]

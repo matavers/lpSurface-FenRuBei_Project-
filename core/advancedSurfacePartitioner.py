@@ -237,11 +237,6 @@ class AdvancedSurfacePartitioner:
                 if distance > 0.5:  # 距离阈值，可根据实际情况调整
                     continue
                 
-                # 使用指标计算器计算三个新指标
-                gaussian_sim = self.indicator_calculator.calculate_gaussian_curvature_similarity(i, j)
-                geometric_sim = self.indicator_calculator.calculate_geometric_continuity_similarity(i, j)
-                developable_sim = self.indicator_calculator.calculate_developable_surface_error_similarity(i, j)
-                
                 # 计算综合相似性（局部相似性）
                 local_weight = self.indicator_calculator.calculate_combined_similarity(i, j)
                 

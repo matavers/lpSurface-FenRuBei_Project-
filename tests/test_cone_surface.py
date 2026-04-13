@@ -299,6 +299,18 @@ def run_test():
         )
         scalar_field = iso_scallop_generator.generate_scalar_field()
         
+        # 统计残留高度数据
+        if scalar_field is not None and len(scalar_field) > 0:
+            max_scallop = np.max(scalar_field)
+            avg_scallop = np.mean(scalar_field)
+            std_scallop = np.std(scalar_field)
+            print(f"   残留高度统计: 最大={max_scallop:.4f} mm, 平均={avg_scallop:.4f} mm, 标准差={std_scallop:.4f} mm")
+        else:
+            max_scallop = 0.0
+            avg_scallop = 0.0
+            std_scallop = 0.0
+            print("   残留高度数据不可用")
+        
         # 8.3 提取等值线
         print("   8.3 提取等值线...")
         iso_curves = iso_scallop_generator.extract_iso_curves(scalar_field)
@@ -315,14 +327,44 @@ def run_test():
         
         print(f"   生成了 {len(tool_paths['paths'])} 条刀具路径")
         
-        # 9. 计算路径总长度
+        # 9. 计算路径总长度和质量指标
         total_length = 0
+        path_lengths = []
+        path_smoothness = []
+        
         for path_data in tool_paths['paths']:
             path_points = path_data['points']
+            if len(path_points) < 2:
+                continue
+            
+            # 计算路径长度
+            path_length = 0
             for i in range(len(path_points) - 1):
-                total_length += np.linalg.norm(path_points[i+1] - path_points[i])
+                segment_length = np.linalg.norm(path_points[i+1] - path_points[i])
+                path_length += segment_length
+            total_length += path_length
+            path_lengths.append(path_length)
+            
+            # 计算路径平滑度（相邻线段的角度变化）
+            if len(path_points) >= 3:
+                smoothness_sum = 0
+                for i in range(1, len(path_points) - 1):
+                    v1 = np.array(path_points[i]) - np.array(path_points[i-1])
+                    v2 = np.array(path_points[i+1]) - np.array(path_points[i])
+                    if np.linalg.norm(v1) > 1e-6 and np.linalg.norm(v2) > 1e-6:
+                        cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                        cos_theta = np.clip(cos_theta, -1, 1)
+                        angle = np.arccos(cos_theta)
+                        smoothness_sum += angle
+                avg_smoothness = smoothness_sum / (len(path_points) - 2) if (len(path_points) - 2) > 0 else 0
+                path_smoothness.append(avg_smoothness)
+        
+        # 计算路径质量指标
+        avg_path_length = np.mean(path_lengths) if path_lengths else 0
+        avg_smoothness = np.mean(path_smoothness) if path_smoothness else 0
         
         print(f"刀具路径生成完成: {len(tool_paths['paths'])} 条路径, 总长度 {total_length:.2f} mm")
+        print(f"路径质量: 平均路径长度={avg_path_length:.2f} mm, 平均平滑度={avg_smoothness:.4f} rad")
         
         # 10. 可视化结果
         print("10. 可视化结果...")
@@ -425,6 +467,12 @@ def run_test():
             'num_partitions': num_partitions,
             'num_tool_paths': len(tool_paths['paths']),
             'total_path_length': total_length,
+            'avg_path_length': avg_path_length,
+            'avg_smoothness': avg_smoothness,
+            'max_scallop': max_scallop,
+            'avg_scallop': avg_scallop,
+            'std_scallop': std_scallop,
+            'partition_time': partition_time,
             'num_vertices': len(mesh.vertices),
             'num_triangles': len(mesh.triangles),
             'symmetry_types': symmetry_types if symmetry_types else []

@@ -251,43 +251,6 @@ class MeshProcessor:
         
         return areas
 
-    def get_vertex_neighbors(self, vertex_idx: int, depth: int = 1) -> List[int]:
-        """获取顶点的邻居（指定深度）"""
-        visited = set([vertex_idx])
-        current_level = [vertex_idx]
-
-        for _ in range(depth):
-            next_level = []
-            for v in current_level:
-                for neighbor in self.adjacency[v]:
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        next_level.append(neighbor)
-            current_level = next_level
-
-        return list(visited - set([vertex_idx]))
-
-    def calculate_geodesic_distance(self, source_vertex: int, max_distance: float = 1.0) -> np.ndarray:
-        """计算测地距离（简化BFS实现）"""
-        distances = np.full(len(self.vertices), np.inf)
-        distances[source_vertex] = 0
-        queue = [source_vertex]
-
-        while queue:
-            current = queue.pop(0)
-            current_dist = distances[current]
-
-            for neighbor in self.adjacency[current]:
-                # 计算边的欧氏距离
-                edge_length = np.linalg.norm(self.vertices[current] - self.vertices[neighbor])
-                new_dist = current_dist + edge_length
-
-                if new_dist < distances[neighbor] and new_dist <= max_distance:
-                    distances[neighbor] = new_dist
-                    queue.append(neighbor)
-
-        return distances
-
     def get_face_containing_vertex(self, vertex_idx: int) -> List[int]:
         """获取包含指定顶点的面索引"""
         face_indices = []
@@ -295,20 +258,6 @@ class MeshProcessor:
             if vertex_idx in face:
                 face_indices.append(i)
         return face_indices
-
-    def get_surface_point(self, face_idx: int, u: float, v: float) -> np.ndarray:
-        """获取面上的点（重心坐标）"""
-        face = self.faces[face_idx]
-        if len(face) == 3:
-            # 三角形
-            w = 1 - u - v
-            point = (u * self.vertices[face[0]] +
-                     v * self.vertices[face[1]] +
-                     w * self.vertices[face[2]])
-            return point
-        else:
-            # 处理多边形
-            raise NotImplementedError("仅支持三角形网格")
     
     def calculate_max_cutting_width(self, tool):
         """计算每个顶点的最大切削宽度

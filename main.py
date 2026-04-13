@@ -21,7 +21,6 @@ from core.pathGenerator import PathGenerator
 from core.developableSurfaceFitter import DevelopableSurfaceFitter
 from utils.visualization import Visualizer
 from utils.geometryTools import GeometryTools
-from utils.nurbsSurfaceProcessor import NURBSSurfaceProcessor
 
 
 class FiveAxisMachiningSystem:
@@ -39,7 +38,6 @@ class FiveAxisMachiningSystem:
         self.visualizer = Visualizer()
         self.developable_fitter = None
         self.mesh = None  # 存储Open3D网格对象
-        self.nurbs_processor = None  # NURBS曲面处理器
 
         # 结果存储
         self.results = {
@@ -161,59 +159,10 @@ class FiveAxisMachiningSystem:
         else:
             return False
 
-    def load_mesh_from_file(self, input_path, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, uniform_sampling=False, nurbs_surface_type=None):
+    def load_mesh_from_file(self, input_path, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, uniform_sampling=False):
         """从文件加载网格或生成曲面网格"""
-        # 处理NURBS曲面
-        if nurbs_surface_type:
-            print(f"使用NURBS曲面: {nurbs_surface_type}")
-            # 创建NURBS曲面处理器
-            self.nurbs_processor = NURBSSurfaceProcessor()
-            
-            # 根据类型创建不同的NURBS曲面
-            if nurbs_surface_type == "cylinder":
-                # 创建圆柱面
-                radius = surface_params.get('radius', 1.0)
-                height = surface_params.get('height', 2.0)
-                resolution = surface_params.get('resolution', 16)
-                self.nurbs_processor.create_cylinder_surface(radius=radius, height=height, resolution=resolution)
-            elif nurbs_surface_type == "test":
-                # 创建测试曲面
-                self.nurbs_processor.create_test_surface()
-            elif nurbs_surface_type == "pdf":
-                # 从PDF文件数据创建测试曲面
-                self.nurbs_processor.create_test_surface_from_pdf()
-            else:
-                raise ValueError(f"不支持的NURBS曲面类型: {nurbs_surface_type}")
-            
-            # 采样点云
-            print("从NURBS曲面采样点云...")
-            resolution_u = surface_params.get('resolution_u', 50)
-            resolution_v = surface_params.get('resolution_v', 50)
-            adaptive = surface_params.get('adaptive', True)
-            curvature_threshold = surface_params.get('curvature_threshold', 0.1)
-            
-            points, normals, curvatures, principal_curvatures = self.nurbs_processor.sample_points(
-                resolution_u=resolution_u,
-                resolution_v=resolution_v,
-                adaptive=adaptive,
-                curvature_threshold=curvature_threshold
-            )
-            print(f"采样完成，得到 {len(points)} 个点")
-            
-            # 创建网格
-            print("从点云创建网格...")
-            self.mesh = self.nurbs_processor.create_mesh()
-            
-            # 可视化当前操作的网格
-            print("可视化当前操作的网格...")
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(window_name="当前操作网格")
-            vis.add_geometry(self.mesh)
-            print("按ESC键关闭可视化窗口...")
-            vis.run()
-            vis.destroy_window()
         # 当mesh_algorithm为obj时，直接使用OBJ文件，跳过曲面函数生成和采样步骤
-        elif mesh_algorithm == "obj":
+        if mesh_algorithm == "obj":
             # 检查文件是否存在
             if not os.path.exists(input_path):
                 raise ValueError(f"文件不存在: {input_path}")
@@ -398,20 +347,7 @@ class FiveAxisMachiningSystem:
         # 暂时使用一个简单的适配器，未来可以加入更多的底层库或者加强对Open3D网格的支持
         self.mesh_processor = MeshProcessor(self.mesh)
         
-        # 如果使用了NURBS曲面，为网格处理器添加几何属性
-        if nurbs_surface_type and hasattr(self.nurbs_processor, 'curvatures') and hasattr(self.nurbs_processor, 'principal_curvatures'):
-            print("为网格处理器添加NURBS曲面几何属性...")
-            # 注意：网格的顶点数量可能与原始点云不同，这里使用网格处理器自带的计算方法
-            self.mesh_processor._estimate_curvatures()
-            # 计算主曲率
-            self.mesh_processor.principal_curvatures = np.zeros((len(self.mesh_processor.vertices), 2))
-            for i in range(len(self.mesh_processor.vertices)):
-                # 简单计算主曲率作为示例
-                self.mesh_processor.principal_curvatures[i] = [self.mesh_processor.curvatures[i], self.mesh_processor.curvatures[i]]
-            # 添加高斯曲率（使用平均曲率代替）
-            self.mesh_processor.gaussian_curvatures = self.mesh_processor.curvatures
-            # 添加直纹面逼近误差
-            self.mesh_processor.rolled_error = np.random.rand(len(self.mesh_processor.vertices))
+
         
         return self.mesh_processor
 
@@ -426,7 +362,7 @@ class FiveAxisMachiningSystem:
         print(f"刀具设置完成: {tool_config['type']}")
         return self.tool
 
-    def run_partitioning(self):
+    def run_partitioning(self, symmetry_mode="auto", symmetry_types=None, partition_algorithm="leiden"):
         """运行表面分区"""
         if not self.mesh_processor or not self.tool:
             raise ValueError("请先加载网格和设置刀具")
@@ -436,22 +372,40 @@ class FiveAxisMachiningSystem:
         # 使用新的高级表面分区器（基于算法version2）
         from core.advancedSurfacePartitioner import AdvancedSurfacePartitioner
         
+        # 根据对称性模式设置对称性类型
+        if symmetry_mode == "auto":
+            # 自动检测所有类型的对称性
+            symmetry_types = ['rotation', 'translation', 'reflection', 'helical', 'combined']
+            print("启用自动对称性检测")
+        elif symmetry_mode == "manual" and symmetry_types:
+            # 使用手动指定的对称性类型
+            print(f"启用手动对称性检测，指定类型: {symmetry_types}")
+        else:
+            # 禁用对称性计算
+            symmetry_types = None
+            print("禁用对称性计算")
+        
         self.partitioner = AdvancedSurfacePartitioner(
             self.mesh_processor,
             self.tool,
             resolution=self.config['algorithm']['partition_resolution'],
             alpha=0.3,  # 全局引导强度
-            global_field='rolled_error'  # 使用直纹面逼近误差作为全局场
+            global_field='rolled_error',  # 使用直纹面逼近误差作为全局场
+            symmetry_types=symmetry_types
         )
         print("使用新的基于算法version2的分区器")
+        print(f"使用分区算法: {partition_algorithm}")
 
-        # 计算切削宽度和直纹面逼近误差
-        print("计算切削宽度和直纹面逼近误差...")
-        self.mesh_processor.calculate_max_cutting_width(self.tool)
-        self.mesh_processor.calculate_rolled_error()
+        # 映射分区算法名称到聚类方法
+        clustering_method_map = {
+            "leiden": "leiden",
+            "spectral": "spectral",
+            "community": "alternative"
+        }
+        clustering_method = clustering_method_map.get(partition_algorithm, "leiden")
 
         start_time = time.time()
-        partition_labels, edge_midpoints = self.partitioner.partition_surface()
+        partition_labels, edge_midpoints = self.partitioner.partition_surface(clustering_method=clustering_method)
         partition_time = time.time() - start_time
 
         self.results['partition_labels'] = partition_labels
@@ -560,6 +514,28 @@ class FiveAxisMachiningSystem:
                 total_length += np.linalg.norm(points[i + 1] - points[i])
         return total_length
 
+    def fit_developable_surfaces(self, error_threshold: float = 0.01):
+        """拟合直纹面"""
+        if not self.mesh_processor or self.results['partition_labels'] is None:
+            raise ValueError("请先加载网格和运行表面分区")
+
+        print("拟合直纹面...")
+
+        self.developable_fitter = DevelopableSurfaceFitter(self.mesh_processor)
+
+        # 获取边缘中点
+        edge_midpoints = self.results.get('edge_midpoints', np.array([]))
+
+        # 拟合所有分区为直纹面
+        developable_surfaces = self.developable_fitter.fit_developable_surfaces(self.results['partition_labels'], edge_midpoints)
+
+        self.results['developable_surfaces'] = developable_surfaces
+        self.results['metrics']['num_developable_surfaces'] = len(developable_surfaces)
+
+        print(f"直纹面拟合完成: {len(developable_surfaces)} 个直纹面")
+
+        return developable_surfaces
+
     def visualize_results(self):
         """可视化所有结果"""
         print("可视化结果...")
@@ -644,28 +620,6 @@ class FiveAxisMachiningSystem:
         metrics_file = os.path.join(output_dir, "metrics.json")
         with open(metrics_file, 'w') as f:
             json.dump(self.results['metrics'], f, indent=2)
-    
-    def fit_developable_surfaces(self, error_threshold: float = 0.01):
-        """拟合直纹面"""
-        if not self.mesh_processor or self.results['partition_labels'] is None:
-            raise ValueError("请先加载网格和运行表面分区")
-
-        print("拟合直纹面...")
-
-        self.developable_fitter = DevelopableSurfaceFitter(self.mesh_processor)
-
-        # 获取边缘中点
-        edge_midpoints = self.results.get('edge_midpoints', np.array([]))
-
-        # 拟合所有分区为直纹面
-        developable_surfaces = self.developable_fitter.fit_developable_surfaces(self.results['partition_labels'], edge_midpoints)
-
-        self.results['developable_surfaces'] = developable_surfaces
-        self.results['metrics']['num_developable_surfaces'] = len(developable_surfaces)
-
-        print(f"直纹面拟合完成: {len(developable_surfaces)} 个直纹面")
-
-        return developable_surfaces
 
     def _export_additional_data(self, output_dir):
         """导出其他数据"""
@@ -808,7 +762,7 @@ class FiveAxisMachiningSystem:
                     json.dump({'edges': unique_edges}, f, indent=2)
                 print(f"分区边缘数据已保存: {len(unique_edges)} 条边缘")
 
-    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01, uniform_sampling=False, nurbs_surface_type=None):
+    def run_full_pipeline(self, input_path, skip_visualization=False, resume_from=None, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, developable_fit=False, developable_error_threshold=0.01, uniform_sampling=False, symmetry_mode="auto", symmetry_types=None, partition_algorithm="leiden"):
         """运行完整处理流程"""
         print("=" * 50)
         print("五轴加工路径规划系统")
@@ -820,8 +774,8 @@ class FiveAxisMachiningSystem:
             
             # 1. 加载网格
             print("\n1. 加载网格...")
-            # 传递uniform_sampling和nurbs_surface_type参数给load_mesh_from_file
-            self.load_mesh_from_file(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, uniform_sampling=uniform_sampling, nurbs_surface_type=nurbs_surface_type)
+            # 传递uniform_sampling参数给load_mesh_from_file
+            self.load_mesh_from_file(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, uniform_sampling=uniform_sampling)
 
             # 2. 设置刀具
             print("\n2. 设置刀具...")
@@ -836,7 +790,7 @@ class FiveAxisMachiningSystem:
                 self.results['edge_midpoints'] = edge_midpoints
                 print("跳过分区步骤，使用已加载的分区结果")
             else:
-                self.run_partitioning()
+                self.run_partitioning(symmetry_mode=symmetry_mode, symmetry_types=symmetry_types, partition_algorithm=partition_algorithm)
                 if self.results['partition_labels'] is not None and self.results['edge_midpoints'] is not None:
                     self.save_intermediate_result("partition_labels", self.results['partition_labels'])
                     self.save_intermediate_result("edge_midpoints", self.results['edge_midpoints'])
@@ -917,7 +871,7 @@ class FiveAxisMachiningSystem:
             self.save_metrics()
             return False
     
-    def run_partition_only(self, input_path, skip_visualization=False, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, nurbs_surface_type=None):
+    def run_partition_only(self, input_path, skip_visualization=False, mesh_algorithm="delaunay_cocone", surface_func=None, surface_params=None, symmetry_mode="auto", symmetry_types=None, partition_algorithm="leiden"):
         """只运行分区并保存数据，不执行刀具路径规划"""
         print("=" * 70)
         print("运行分区并保存数据（不执行刀具路径规划）")
@@ -926,7 +880,7 @@ class FiveAxisMachiningSystem:
         try:
             # 1. 加载网格
             print("\n1. 加载网格...")
-            self.load_mesh_from_file(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, nurbs_surface_type=nurbs_surface_type)
+            self.load_mesh_from_file(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params)
 
             # 2. 设置刀具
             print("\n2. 设置刀具...")
@@ -934,7 +888,7 @@ class FiveAxisMachiningSystem:
 
             # 3. 表面分区
             print("\n3. 运行表面分区...")
-            partition_labels, edge_midpoints = self.run_partitioning()
+            partition_labels, edge_midpoints = self.run_partitioning(symmetry_mode=symmetry_mode, symmetry_types=symmetry_types, partition_algorithm=partition_algorithm)
             
             # 4. 创建基于时间戳的output子目录
             import datetime
@@ -1107,179 +1061,72 @@ class FiveAxisMachiningSystem:
             return False
 
 
-# 命令行运行
+# 脚本配置开关
 if __name__ == "__main__":
-    import sys
+    # 1. 采样建模开关
+    use_sampling = False  # True: 使用采样建模, False: 使用文件路径
     
-    # 解析命令行参数
-    partition_only = False
-    mesh_algorithm = "delaunay_cocone"  # 默认使用Delaunay + Cocone算法
-    surface_func = None
-    surface_params = {}
-    input_path = None
-    developable_fit = False
-    developable_error_threshold = 0.01
-    uniform_sampling = False
-    nurbs_surface_type = None
+    # 2. 文件路径（当use_sampling=False时必须指定）
+    input_path = "D:\Projects\lpSurface\GM\data\models\Polylaplace.obj"  # OBJ文件路径
     
-    for arg in sys.argv[1:]:
-        if arg == "--partition-only":
-            partition_only = True
-        elif arg.startswith("--mesh-algorithm="):
-            mesh_algorithm = arg.split("=")[1]
-        elif arg.startswith("--surface="):
-            surface_func = arg.split("=")[1]
-        elif arg.startswith("--resolution="):
-            surface_params['resolution'] = int(arg.split("=")[1])
-        elif arg.startswith("--path="):
-            input_path = arg.split("=")[1]
-        elif arg == "--developable-fit":
-            developable_fit = True
-        elif arg.startswith("--developable-error="):
-            developable_error_threshold = float(arg.split("=")[1])
-        elif arg == "--uniform-sampling":
-            uniform_sampling = True
-        elif arg.startswith("--nurbs="):
-            nurbs_surface_type = arg.split("=")[1]
-        elif arg.startswith("--nurbs-resolution-u="):
-            surface_params['resolution_u'] = int(arg.split("=")[1])
-        elif arg.startswith("--nurbs-resolution-v="):
-            surface_params['resolution_v'] = int(arg.split("=")[1])
-        elif arg.startswith("--nurbs-radius="):
-            surface_params['radius'] = float(arg.split("=")[1])
-        elif arg.startswith("--nurbs-height="):
-            surface_params['height'] = float(arg.split("=")[1])
+    # 3. 分区算法选择
+    partition_algorithm = "leiden"  # "leiden": Leiden分区, "spectral": 谱聚类, "community": community替代算法
     
-    # 验证参数组合
-    # 1. --path只能与--mesh-algorithm=obj共存
-    if input_path and mesh_algorithm != "obj":
-        print("错误: --path参数只能与--mesh-algorithm=obj共存")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--nurbs=<type>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --nurbs: NURBS曲面类型，可选值: cylinder, test, pdf")
-        print("  --nurbs-resolution-u: NURBS曲面U方向分辨率，默认值: 50")
-        print("  --nurbs-resolution-v: NURBS曲面V方向分辨率，默认值: 50")
-        print("  --nurbs-radius: 圆柱面半径，默认值: 1.0")
-        print("  --nurbs-height: 圆柱面高度，默认值: 2.0")
-        sys.exit(1)
+    # 4. 库支持缺失处理
+    handle_missing_lib = "degrade"  # "error": 报错, "degrade": 使用退化算法
     
-    # 2. --surface只能与--mesh-algorithm=算法名称（非obj）共存
-    if surface_func and mesh_algorithm == "obj":
-        print("错误: --surface参数不能与--mesh-algorithm=obj共存")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--nurbs=<type>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --nurbs: NURBS曲面类型，可选值: cylinder, test, pdf")
-        print("  --nurbs-resolution-u: NURBS曲面U方向分辨率，默认值: 50")
-        print("  --nurbs-resolution-v: NURBS曲面V方向分辨率，默认值: 50")
-        print("  --nurbs-radius: 圆柱面半径，默认值: 1.0")
-        print("  --nurbs-height: 圆柱面高度，默认值: 2.0")
-        sys.exit(1)
+    # 5. 对称性计算开关
+    symmetry_mode = None  # "auto": 自动检测, "manual": 手动指定; None: 不计算对称性
+    # 当symmetry_mode="manual"时，指定对称性类别
+    symmetry_types = []  # 空列表表示禁用对称性计算
     
-    # 3. 当--mesh-algorithm=obj时，必须指定--path
-    if mesh_algorithm == "obj" and not input_path:
-        print("错误: 当--mesh-algorithm=obj时，必须指定--path参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--nurbs=<type>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --nurbs: NURBS曲面类型，可选值: cylinder, test, pdf")
-        print("  --nurbs-resolution-u: NURBS曲面U方向分辨率，默认值: 50")
-        print("  --nurbs-resolution-v: NURBS曲面V方向分辨率，默认值: 50")
-        print("  --nurbs-radius: 圆柱面半径，默认值: 1.0")
-        print("  --nurbs-height: 圆柱面高度，默认值: 2.0")
-        sys.exit(1)
+    # 6. 其他配置
+    partition_only = False  # True: 只运行分区, False: 运行完整流程
+    mesh_algorithm = "obj"  # 网格生成算法: delaunay_cocone, bpa, poisson, tsdf, obj
+    surface_func = None  # 曲面函数名称: sphere, torus, saddle
+    surface_params = {"resolution": 50}  # 曲面参数
+    developable_fit = False  # 是否开启直纹面逼近
+    developable_error_threshold = 0.01  # 直纹面逼近误差阈值
+    uniform_sampling = False  # 是否使用均匀采样
     
-    # 4. 当使用--surface时，不需要指定--path
-    if surface_func and input_path:
-        print("错误: 当使用--surface参数时，不需要指定--path参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--nurbs=<type>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --nurbs: NURBS曲面类型，可选值: cylinder, test, pdf")
-        print("  --nurbs-resolution-u: NURBS曲面U方向分辨率，默认值: 50")
-        print("  --nurbs-resolution-v: NURBS曲面V方向分辨率，默认值: 50")
-        print("  --nurbs-radius: 圆柱面半径，默认值: 1.0")
-        print("  --nurbs-height: 圆柱面高度，默认值: 2.0")
-        sys.exit(1)
+    # 验证配置
+    if use_sampling:
+        if mesh_algorithm == "obj":
+            print("错误: 当use_sampling=True时，mesh_algorithm不能为obj")
+            exit(1)
+        if surface_func is None:
+            print("错误: 当use_sampling=True时，必须指定surface_func")
+            exit(1)
+    else:
+        if mesh_algorithm != "obj":
+            print("错误: 当use_sampling=False时，mesh_algorithm必须为obj")
+            exit(1)
+        if input_path is None:
+            print("错误: 当use_sampling=False时，必须指定input_path")
+            exit(1)
     
-    # 5. 当使用--nurbs时，不需要指定--surface或--path
-    if nurbs_surface_type and (surface_func or input_path):
-        print("错误: 当使用--nurbs参数时，不需要指定--surface或--path参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--nurbs=<type>]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --nurbs: NURBS曲面类型，可选值: cylinder, test, pdf")
-        print("  --nurbs-resolution-u: NURBS曲面U方向分辨率，默认值: 50")
-        print("  --nurbs-resolution-v: NURBS曲面V方向分辨率，默认值: 50")
-        print("  --nurbs-radius: 圆柱面半径，默认值: 1.0")
-        print("  --nurbs-height: 圆柱面高度，默认值: 2.0")
-        sys.exit(1)
+    # 检查分区算法库支持
+    try:
+        from core.advancedSurfacePartitioner import AdvancedSurfacePartitioner
+        advanced_algorithm_available = True
+    except ImportError:
+        advanced_algorithm_available = False
     
-    # 6. 当既没有--path、--surface也没有--nurbs时，使用默认曲面
-    if not input_path and not surface_func and not nurbs_surface_type:
-        print("错误: 必须指定--path参数、--surface参数或--nurbs参数")
-        # 显示用法说明
-        print("用法: python main.py [--partition-only] [--mesh-algorithm=<algorithm>] [--surface=<function>] [--resolution=<int>] [--path=<path>] [--nurbs=<type>] [--nurbs-resolution-u=<int>] [--nurbs-resolution-v=<int>] [--nurbs-radius=<float>] [--nurbs-height=<float>] [--developable-fit] [--developable-error=<float>] [--uniform-sampling]")
-        print("  --partition-only: 只运行分区并保存数据，不执行刀具路径规划")
-        print("  --mesh-algorithm: 网格生成算法，可选值: delaunay_cocone (默认), bpa, poisson, tsdf, obj")
-        print("  --surface: 曲面函数名称，可选值: sphere, torus, saddle")
-        print("  --resolution: 曲面采样分辨率，默认值: 50")
-        print("  --uniform-sampling: 使用均匀采样生成网格，确保各向对称")
-        print("  --path: OBJ文件路径（仅与--mesh-algorithm=obj共存）")
-        print("  --nurbs: NURBS曲面类型，可选值: cylinder, test, pdf")
-        print("  --nurbs-resolution-u: NURBS曲面U方向分辨率，默认值: 50")
-        print("  --nurbs-resolution-v: NURBS曲面V方向分辨率，默认值: 50")
-        print("  --nurbs-radius: 圆柱面半径，默认值: 1.0")
-        print("  --nurbs-height: 圆柱面高度，默认值: 2.0")
-        print("  --developable-fit: 开启直纹面逼近功能，不计算刀具路径")
-        print("  --developable-error: 直纹面逼近误差阈值，默认值: 0.01")
-        # 示例用法
-        print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj")
-        print("示例: python main.py --mesh-algorithm=obj --path=test_sphere.obj --partition-only")
-        print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --resolution=50")
-        print("示例: python main.py --mesh-algorithm=bpa --surface=sphere --developable-fit --developable-error=0.005")
-        print("示例: python main.py --nurbs=cylinder --nurbs-radius=1.0 --nurbs-height=2.0")
-        print("示例: python main.py --nurbs=pdf --nurbs-resolution-u=30 --nurbs-resolution-v=30")
-        print("说明:")
-        print("  1. 当 --mesh-algorithm=obj 时，必须指定--path参数，直接使用OBJ文件，跳过采样步骤")
-        print("  2. 当指定 --surface 参数时，会根据曲面函数生成网格，不能与--path参数同时使用")
-        print("  3. 当指定 --nurbs 参数时，会根据NURBS曲面类型生成网格，不能与--surface或--path参数同时使用")
-        print("  4. 曲面方程直接在代码中定义，无需通过命令行传入")
-        print("  5. 有默认值的参数若没有指定，采用默认值")
-        print("  6. 若--mesh-algorithm为obj才采用.obj文件，跳过采样步骤")
-        print("  7. 若为其他算法名称则采样构造网格，随后再进行其他步骤")
-        print("  8. 若指定--developable-fit，则开启直纹面逼近功能，不计算刀具路径")
-        print("  9. 若计算刀具路径，则不逼近直纹面")
-        sys.exit(1)
+    if partition_algorithm == "leiden" and not advanced_algorithm_available:
+        if handle_missing_lib == "error":
+            print("错误: Leiden分区算法库不可用")
+            exit(1)
+        else:
+            print("警告: Leiden分区算法库不可用，使用community替代算法")
+            partition_algorithm = "community"
     
     system = FiveAxisMachiningSystem()
     
     # 检查是否指定了只运行分区
     if partition_only:
-        success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, nurbs_surface_type=nurbs_surface_type)
+        success = system.run_partition_only(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, symmetry_mode=symmetry_mode, symmetry_types=symmetry_types, partition_algorithm=partition_algorithm)
     else:
-        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, developable_fit=developable_fit, developable_error_threshold=developable_error_threshold, uniform_sampling=uniform_sampling, nurbs_surface_type=nurbs_surface_type)
+        success = system.run_full_pipeline(input_path, mesh_algorithm=mesh_algorithm, surface_func=surface_func, surface_params=surface_params, developable_fit=developable_fit, developable_error_threshold=developable_error_threshold, uniform_sampling=uniform_sampling, symmetry_mode=symmetry_mode, symmetry_types=symmetry_types, partition_algorithm=partition_algorithm)
     
     if success:
         print("处理完成!")
