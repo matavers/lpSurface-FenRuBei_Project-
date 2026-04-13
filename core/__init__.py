@@ -5,6 +5,7 @@ from .toolOrientationField import ToolOrientationField
 from .isoScallopField import IsoScallopFieldGenerator
 from .pathGenerator import PathGenerator
 from .indicatorCalculator import IndicatorCalculator
+from .nurbsProcessor import NURBSProcessor
 
 __all__ = [
     'MeshProcessor',
@@ -13,5 +14,6 @@ __all__ = [
     'ToolOrientationField',
     'IsoScallopFieldGenerator',
     'PathGenerator',
-    'IndicatorCalculator'
+    'IndicatorCalculator',
+    'NURBSProcessor'
 ]

@@ -340,7 +340,7 @@ class ResultVisualizer:
                 line_set.points = o3d.utility.Vector3dVector(points)
                 line_set.lines = o3d.utility.Vector2iVector(lines)
                 line_set.paint_uniform_color(color)
-                vis.addwwa_geometry(line_set)
+                vis.add_geometry(line_set)
         
         # 设置视角
         vis.run()
