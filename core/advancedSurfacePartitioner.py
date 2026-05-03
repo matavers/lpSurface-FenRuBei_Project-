@@ -100,6 +100,115 @@ class AdvancedSurfacePartitioner:
         self.sigma_f = np.std(self.global_field_values) if np.std(self.global_field_values) > 0 else 1.0
         
         print("全局场值预计算完成")
+    
+    def calculate_normal_variation(self):
+        """
+        计算相邻顶点间的法向量变化率
+        Returns:
+            法向量变化率数组
+        """
+        print("计算法向量变化率...")
+        
+        # 检查法线是否存在
+        if not hasattr(self.mesh, 'vertex_normals') or len(self.mesh.vertex_normals) != self.num_vertices:
+            print("警告: 法向量不存在，无法计算法向量变化率")
+            return np.zeros(self.num_vertices)
+        
+        # 计算每个顶点的法向量变化率
+        normal_variation = np.zeros(self.num_vertices)
+        
+        for i in range(self.num_vertices):
+            neighbors = self.mesh.adjacency[i]
+            if not neighbors:
+                continue
+            
+            # 获取当前顶点的法向量
+            current_normal = self.mesh.vertex_normals[i]
+            
+            # 计算与邻居顶点的法向量夹角
+            total_angle = 0.0
+            for neighbor in neighbors:
+                neighbor_normal = self.mesh.vertex_normals[neighbor]
+                # 计算夹角
+                dot_product = np.dot(current_normal, neighbor_normal)
+                dot_product = np.clip(dot_product, -1.0, 1.0)
+                angle = np.arccos(dot_product)
+                total_angle += angle
+            
+            # 计算平均变化率
+            normal_variation[i] = total_angle / len(neighbors)
+        
+        print("法向量变化率计算完成")
+        return normal_variation
+    
+    def detect_c1_discontinuities(self, threshold=0.1):
+        """
+        检测C1不连续边界
+        Args:
+            threshold: 法向量变化率阈值
+        Returns:
+            不连续边界边列表
+        """
+        print("检测C1不连续边界...")
+        
+        # 计算法向量变化率
+        normal_variation = self.calculate_normal_variation()
+        
+        # 检测不连续边界
+        discontinuity_edges = []
+        
+        for i in range(self.num_vertices):
+            neighbors = self.mesh.adjacency[i]
+            for neighbor in neighbors:
+                if i < neighbor:  # 避免重复
+                    # 检查两个顶点的法向量变化率
+                    if normal_variation[i] > threshold or normal_variation[neighbor] > threshold:
+                        # 计算两个顶点法向量的夹角
+                        dot_product = np.dot(self.mesh.vertex_normals[i], self.mesh.vertex_normals[neighbor])
+                        dot_product = np.clip(dot_product, -1.0, 1.0)
+                        angle = np.arccos(dot_product)
+                        
+                        if angle > threshold:
+                            discontinuity_edges.append((i, neighbor))
+        
+        print(f"检测到 {len(discontinuity_edges)} 条C1不连续边界")
+        return discontinuity_edges
+    
+    def partition_by_c1_continuity(self, threshold=0.1):
+        """
+        基于C1连续性进行分区
+        Args:
+            threshold: 法向量变化率阈值
+        Returns:
+            分区标签数组
+        """
+        print("基于C1连续性进行分区...")
+        
+        # 检测C1不连续边界
+        discontinuity_edges = self.detect_c1_discontinuities(threshold)
+        
+        # 构建图，不连续边界作为割边
+        G = nx.Graph()
+        G.add_nodes_from(range(self.num_vertices))
+        
+        # 添加所有边，除了不连续边界
+        for i in range(self.num_vertices):
+            neighbors = self.mesh.adjacency[i]
+            for neighbor in neighbors:
+                if (i, neighbor) not in discontinuity_edges and (neighbor, i) not in discontinuity_edges:
+                    G.add_edge(i, neighbor)
+        
+        # 提取连通分量作为分区
+        components = list(nx.connected_components(G))
+        
+        # 分配分区标签
+        labels = np.zeros(self.num_vertices, dtype=int)
+        for idx, component in enumerate(components):
+            for vertex in component:
+                labels[vertex] = idx
+        
+        print(f"C1连续性分区完成: {len(components)} 个分区")
+        return labels
 
     def _compute_local_curvature_similarity(self, i: int, j: int) -> float:
         """

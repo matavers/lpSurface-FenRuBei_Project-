@@ -191,13 +191,6 @@ class Visualizer:
             print("警告: 网格无效，跳过可视化")
             return
         
-        # 创建网格副本
-        new_mesh = o3d.geometry.TriangleMesh()
-        new_mesh.vertices = o3d.utility.Vector3dVector(np.asarray(mesh.vertices))
-        new_mesh.triangles = o3d.utility.Vector3iVector(np.asarray(mesh.triangles))
-        new_mesh.vertex_normals = o3d.utility.Vector3dVector(np.asarray(mesh.vertex_normals))
-        new_mesh.triangle_normals = o3d.utility.Vector3dVector(np.asarray(mesh.triangle_normals))
-
         # 为每个分区设置不同的颜色
         print("为分区设置颜色...")
         unique_labels = np.unique(partition_labels)
@@ -206,19 +199,49 @@ class Visualizer:
         # 评估分区质量
         quality_metrics = self.evaluate_partition_quality(mesh, partition_labels)
         
-        # 创建颜色映射
-        vertex_colors = []
-        for label in partition_labels:
-            # 使用调色板中的颜色，循环使用
-            color_idx = int(label) % len(self.color_palette)
-            vertex_colors.append(self.color_palette[color_idx])
+        # 准备可视化的几何体
+        geometries = []
         
-        # 设置顶点颜色
-        new_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
-
+        # 为每个分区创建线集
+        linesets = []
+        
+        # 获取所有边
+        edges = set()
+        triangles = np.asarray(mesh.triangles)
+        for triangle in triangles:
+            edges.add(tuple(sorted([triangle[0], triangle[1]])))
+            edges.add(tuple(sorted([triangle[1], triangle[2]])))
+            edges.add(tuple(sorted([triangle[2], triangle[0]])))
+        
+        # 为每个分区创建线集
+        for label in unique_labels:
+            # 获取该分区的所有顶点
+            partition_vertices = np.where(partition_labels == label)[0]
+            
+            # 收集该分区的边
+            partition_edges = []
+            for edge in edges:
+                if edge[0] in partition_vertices and edge[1] in partition_vertices:
+                    partition_edges.append(edge)
+            
+            # 创建线集
+            if partition_edges:
+                lineset = o3d.geometry.LineSet()
+                lineset.points = o3d.utility.Vector3dVector(np.asarray(mesh.vertices))
+                lineset.lines = o3d.utility.Vector2iVector(partition_edges)
+                
+                # 为线集设置颜色
+                color_idx = int(label) % len(self.color_palette)
+                color = self.color_palette[color_idx]
+                lineset.colors = o3d.utility.Vector3dVector([color] * len(partition_edges))
+                
+                linesets.append(lineset)
+        
+        # 添加线集到几何体列表
+        geometries.extend(linesets)
+        
         # 创建边缘中点云
         print(f"创建边缘中点云: {len(edge_midpoints)} 个点")
-        geometries = [new_mesh]
         if len(edge_midpoints) > 0:
             midpoint_pcd = o3d.geometry.PointCloud()
             midpoint_pcd.points = o3d.utility.Vector3dVector(edge_midpoints)
@@ -357,6 +380,69 @@ class Visualizer:
             )
 
         print(f"刀具路径可视化完成: {len(line_sets)} 条路径")
+    
+    def visualize_singularities(self, mesh: o3d.geometry.TriangleMesh, 
+                                singularity_info: Dict[int, Dict[str, Any]]):
+        """
+        可视化奇点
+        Args:
+            mesh: 网格对象
+            singularity_info: 奇点信息字典
+        """
+        print(f"可视化奇点: {len(singularity_info)} 个奇点")
+        
+        # 创建奇点标记
+        singularity_points = []
+        singularity_colors = []
+        
+        # 为不同类型的奇点设置不同的颜色
+        color_map = {
+            'sharp_vertex': [1.0, 0.0, 0.0],  # 红色
+            'sharp_edge': [1.0, 0.5, 0.0],    # 橙色
+            'normal_discontinuity': [0.0, 0.0, 1.0],  # 蓝色
+            'low_degree': [0.0, 1.0, 0.0],    # 绿色
+            'high_degree': [1.0, 0.0, 1.0],   # 紫色
+            'extreme_curvature': [0.0, 1.0, 1.0],  # 青色
+            'unknown': [0.5, 0.5, 0.5]        # 灰色
+        }
+        
+        for idx, info in singularity_info.items():
+            singularity_points.append(info['position'])
+            singularity_type = info['type']
+            color = color_map.get(singularity_type, color_map['unknown'])
+            singularity_colors.append(color)
+        
+        # 创建奇点云
+        if singularity_points:
+            singularity_pcd = o3d.geometry.PointCloud()
+            singularity_pcd.points = o3d.utility.Vector3dVector(singularity_points)
+            singularity_pcd.colors = o3d.utility.Vector3dVector(singularity_colors)
+            
+            # 放大奇点标记
+            singularity_pcd.scale(0.05, center=np.mean(singularity_points, axis=0))
+            
+            # 可视化
+            geometries = [mesh, singularity_pcd]
+            o3d.visualization.draw_geometries(
+                geometries, 
+                window_name=f"奇点可视化: {len(singularity_info)} 个奇点",
+                width=1024,
+                height=768
+            )
+            
+            # 显示奇点类型统计
+            type_counts = {}
+            for info in singularity_info.values():
+                singularity_type = info['type']
+                type_counts[singularity_type] = type_counts.get(singularity_type, 0) + 1
+            
+            print("奇点类型统计:")
+            for singularity_type, count in type_counts.items():
+                print(f"  {singularity_type}: {count} 个")
+        else:
+            print("没有检测到奇点")
+        
+        print("奇点可视化完成")
 
     def visualize_scalar_field(self, mesh: o3d.geometry.TriangleMesh,
                                scalar_field: np.ndarray,

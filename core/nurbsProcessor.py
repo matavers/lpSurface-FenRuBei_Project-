@@ -200,6 +200,82 @@ class NURBSProcessor:
         else:
             return np.array([0, 0, 1])
     
+    def calculate_plane_normal(self) -> np.ndarray:
+        """
+        计算平面的法向量（解析方法）
+        Returns:
+            平面法向量
+        """
+        # 从控制点计算平面法向量
+        if self.control_points.shape[0] >= 3 and self.control_points.shape[1] >= 2:
+            # 取三个不共线的控制点
+            p0 = self.control_points[0, 0]
+            p1 = self.control_points[1, 0]
+            p2 = self.control_points[0, 1]
+            
+            # 计算两个向量
+            v1 = p1 - p0
+            v2 = p2 - p0
+            
+            # 计算法向量
+            normal = np.cross(v1, v2)
+            norm = np.linalg.norm(normal)
+            if norm > 1e-8:
+                return normal / norm
+        return np.array([0, 0, 1])
+    
+    def calculate_cylinder_normal(self, u: float, v: float) -> np.ndarray:
+        """
+        计算圆柱面的法向量（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            圆柱面法向量
+        """
+        # 圆柱面法向量指向径向外侧
+        point = self.evaluate(u, v)
+        # 假设圆柱面的中心轴为Z轴
+        # 法向量为从Z轴指向该点的单位向量
+        normal = np.array([point[0], point[1], 0])
+        norm = np.linalg.norm(normal)
+        if norm > 1e-8:
+            return normal / norm
+        return np.array([1, 0, 0])
+    
+    def calculate_sphere_normal(self, u: float, v: float) -> np.ndarray:
+        """
+        计算球面的法向量（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            球面法向量
+        """
+        # 球面法向量从球心指向该点
+        point = self.evaluate(u, v)
+        norm = np.linalg.norm(point)
+        if norm > 1e-8:
+            return point / norm
+        return np.array([0, 0, 1])
+    
+    def calculate_cone_normal(self, u: float, v: float) -> np.ndarray:
+        """
+        计算圆锥面的法向量（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            圆锥面法向量
+        """
+        # 圆锥面法向量
+        point = self.evaluate(u, v)
+        # 假设圆锥顶点在(0, 0, height)，底面在z=0平面
+        # 计算从顶点到该点的向量
+        # 注意：这里需要根据实际圆锥参数调整
+        # 简化实现：使用偏导数叉积
+        return self.calculate_normal(u, v)
+    
     def calculate_curvature(self, u: float, v: float) -> Tuple[float, float]:
         """
         计算NURBS曲面上指定点的主曲率

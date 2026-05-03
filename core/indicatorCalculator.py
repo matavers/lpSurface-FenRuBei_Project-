@@ -6,7 +6,6 @@
 import numpy as np
 import math
 from typing import List, Tuple, Dict, Set
-from mathutils import Vector
 from .meshProcessor import MeshProcessor
 from .nonSphericalTool import NonSphericalTool
 

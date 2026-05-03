@@ -33,6 +33,14 @@ class MeshProcessor:
         # asarray方法将输入转化为array类型
         self.vertices = np.asarray(self.mesh.vertices)
         self.vertex_normals = np.asarray(self.mesh.vertex_normals)
+        
+        # 多法向量存储，用于处理奇点处的法向量不唯一性
+        # 格式：每个顶点可能有多个法向量，存储为列表
+        self.multiple_normals = [[] for _ in range(len(self.vertices))]
+        # 初始化：将原始法向量作为第一个法向量
+        for i in range(len(self.vertices)):
+            if len(self.vertex_normals) > i:
+                self.multiple_normals[i].append(self.vertex_normals[i])
 
         # 面数据
         self.faces = np.asarray(self.mesh.triangles)
@@ -90,8 +98,8 @@ class MeshProcessor:
         # 计算顶点曲率（简化版本）
         self.curvatures = self._estimate_curvatures()
         
-        # 计算主曲率
-        self.principal_curvatures = self._estimate_principal_curvatures()
+        # 计算主曲率和主方向
+        self.principal_curvatures, self.principal_directions1, self.principal_directions2 = self._estimate_principal_curvatures()
 
         # 计算面面积
         self.face_areas = self._compute_face_areas()
@@ -181,13 +189,18 @@ class MeshProcessor:
 
         return smoothed_curvatures
 
-    def _estimate_principal_curvatures(self) -> np.ndarray:
-        """估计顶点主曲率
+    def _estimate_principal_curvatures(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        估计顶点主曲率和主方向
         
         Returns:
-            主曲率数组，形状为 (N, 2)，其中N是顶点数
+            tuple: (主曲率数组, 主方向1数组, 主方向2数组)
+                主曲率数组形状为 (N, 2)，其中N是顶点数
+                主方向数组形状为 (N, 3)，其中N是顶点数
         """
         principal_curvatures = np.zeros((len(self.vertices), 2))
+        principal_directions1 = np.zeros((len(self.vertices), 3))
+        principal_directions2 = np.zeros((len(self.vertices), 3))
         
         for i in range(len(self.vertices)):
             neighbors = self.adjacency[i]
@@ -213,11 +226,11 @@ class MeshProcessor:
             # 最小二乘拟合
             try:
                 coeffs, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-                a, b, c, d, e, f = coeffs
+                a, b_coeff, c, d, e, f = coeffs
                 
                 # 计算曲率
-                H = (a + b) / 2
-                K = a * b - c * c
+                H = (a + b_coeff) / 2
+                K = a * b_coeff - c * c
                 
                 if K >= H*H:
                     k1 = H
@@ -228,10 +241,62 @@ class MeshProcessor:
                     k2 = H - sqrt_val
                 
                 principal_curvatures[i] = [k1, k2]
+                
+                # 计算主方向
+                # 主方向是曲率张量的特征向量
+                # 曲率张量矩阵
+                curvature_tensor = np.array([[a, c], [c, b_coeff]])
+                
+                # 计算特征值和特征向量
+                eigenvalues, eigenvectors = np.linalg.eigh(curvature_tensor)
+                
+                # 特征值从大到小排序
+                sorted_indices = np.argsort(eigenvalues)[::-1]
+                eigenvalues = eigenvalues[sorted_indices]
+                eigenvectors = eigenvectors[:, sorted_indices]
+                
+                # 获取主方向
+                # 将2D主方向转换为3D主方向
+                # 使用法向量构建局部坐标系
+                normal = self.vertex_normals[i]
+                
+                # 生成两个正交的基向量
+                if abs(normal[2]) < 0.9:
+                    vec1 = np.cross(normal, [0, 0, 1])
+                else:
+                    vec1 = np.cross(normal, [1, 0, 0])
+                vec1 = vec1 / np.linalg.norm(vec1)
+                vec2 = np.cross(normal, vec1)
+                vec2 = vec2 / np.linalg.norm(vec2)
+                
+                # 将2D主方向转换为3D
+                dir1_2d = eigenvectors[:, 0]
+                dir2_2d = eigenvectors[:, 1]
+                
+                dir1_3d = dir1_2d[0] * vec1 + dir1_2d[1] * vec2
+                dir2_3d = dir2_2d[0] * vec1 + dir2_2d[1] * vec2
+                
+                # 归一化
+                dir1_3d = dir1_3d / np.linalg.norm(dir1_3d)
+                dir2_3d = dir2_3d / np.linalg.norm(dir2_3d)
+                
+                principal_directions1[i] = dir1_3d
+                principal_directions2[i] = dir2_3d
             except:
                 principal_curvatures[i] = [0, 0]
+                # 默认主方向
+                normal = self.vertex_normals[i]
+                if abs(normal[2]) < 0.9:
+                    vec1 = np.cross(normal, [0, 0, 1])
+                else:
+                    vec1 = np.cross(normal, [1, 0, 0])
+                vec1 = vec1 / np.linalg.norm(vec1)
+                vec2 = np.cross(normal, vec1)
+                vec2 = vec2 / np.linalg.norm(vec2)
+                principal_directions1[i] = vec1
+                principal_directions2[i] = vec2
         
-        return principal_curvatures
+        return principal_curvatures, principal_directions1, principal_directions2
 
     def _compute_face_areas(self) -> np.ndarray:
         """计算面面积
@@ -341,3 +406,225 @@ class MeshProcessor:
             # 计算误差
             error = abs(original_curvature - rolled_curvature)
             self.rolled_error[i] = error
+    
+    def add_normal(self, vertex_idx: int, normal: np.ndarray):
+        """为顶点添加一个法向量
+        
+        Args:
+            vertex_idx: 顶点索引
+            normal: 法向量
+        """
+        if 0 <= vertex_idx < len(self.vertices):
+            # 归一化法向量
+            norm = np.linalg.norm(normal)
+            if norm > 1e-8:
+                normal = normal / norm
+            # 检查是否已经存在相同的法向量
+            exists = False
+            for existing_normal in self.multiple_normals[vertex_idx]:
+                if np.linalg.norm(existing_normal - normal) < 1e-6:
+                    exists = True
+                    break
+            if not exists:
+                self.multiple_normals[vertex_idx].append(normal)
+    
+    def get_normals(self, vertex_idx: int) -> List[np.ndarray]:
+        """获取顶点的所有法向量
+        
+        Args:
+            vertex_idx: 顶点索引
+        Returns:
+            法向量列表
+        """
+        if 0 <= vertex_idx < len(self.vertices):
+            return self.multiple_normals[vertex_idx]
+        return []
+    
+    def get_normal(self, vertex_idx: int, index: int = 0) -> np.ndarray:
+        """
+        获取顶点的指定法向量
+        
+        Args:
+            vertex_idx: 顶点索引
+            index: 法向量索引
+        Returns:
+            法向量
+        """
+        if 0 <= vertex_idx < len(self.vertices):
+            normals = self.multiple_normals[vertex_idx]
+            if normals:
+                return normals[min(index, len(normals) - 1)]
+        # 回退到原始法向量
+        if 0 <= vertex_idx < len(self.vertex_normals):
+            return self.vertex_normals[vertex_idx]
+        return np.array([0, 0, 1])
+    
+    def update_mesh_normals(self):
+        """
+        更新Open3D网格对象的法向量
+        使用multiple_normals中的第一个法向量作为网格的法向量
+        """
+        if hasattr(self, 'mesh') and self.mesh is not None:
+            # 为每个顶点选择第一个法向量
+            updated_normals = []
+            for i in range(len(self.vertices)):
+                normals = self.multiple_normals[i]
+                if normals:
+                    updated_normals.append(normals[0])
+                elif i < len(self.vertex_normals):
+                    updated_normals.append(self.vertex_normals[i])
+                else:
+                    updated_normals.append(np.array([0, 0, 1]))
+            
+            # 更新Open3D网格的法向量
+            self.mesh.vertex_normals = o3d.utility.Vector3dVector(np.array(updated_normals))
+            self.mesh.compute_triangle_normals()
+            # 更新内部存储的法向量
+            self.vertex_normals = np.array(updated_normals)
+    
+    def detect_singularities(self, curvature_threshold=1.0, normal_variation_threshold=0.5):
+        """
+        检测曲面上的奇点
+        
+        Args:
+            curvature_threshold: 曲率阈值
+            normal_variation_threshold: 法向量变化率阈值
+        Returns:
+            奇点索引列表
+        """
+        print("检测奇点...")
+        
+        singularities = []
+        
+        # 计算法向量变化率
+        normal_variation = np.zeros(len(self.vertices))
+        for i in range(len(self.vertices)):
+            neighbors = self.adjacency[i]
+            if len(neighbors) < 3:
+                continue
+            
+            current_normal = self.vertex_normals[i]
+            total_angle = 0.0
+            for neighbor in neighbors:
+                neighbor_normal = self.vertex_normals[neighbor]
+                dot_product = np.dot(current_normal, neighbor_normal)
+                dot_product = np.clip(dot_product, -1.0, 1.0)
+                angle = np.arccos(dot_product)
+                total_angle += angle
+            normal_variation[i] = total_angle / len(neighbors)
+        
+        # 检测奇点
+        for i in range(len(self.vertices)):
+            # 条件1: 曲率超过阈值
+            if hasattr(self, 'curvatures') and self.curvatures[i] > curvature_threshold:
+                singularities.append(i)
+                continue
+            
+            # 条件2: 法向量变化率超过阈值
+            if normal_variation[i] > normal_variation_threshold:
+                singularities.append(i)
+                continue
+            
+            # 条件3: 主曲率异常
+            if hasattr(self, 'principal_curvatures'):
+                k1, k2 = self.principal_curvatures[i]
+                # 检查主曲率是否异常大
+                if abs(k1) > 10.0 or abs(k2) > 10.0:
+                    singularities.append(i)
+                    continue
+                # 检查主曲率比值是否异常
+                if abs(k1) > 1e-6 and abs(k2) > 1e-6:
+                    ratio = max(abs(k1/k2), abs(k2/k1))
+                    if ratio > 10.0:
+                        singularities.append(i)
+                        continue
+            
+            # 条件4: 拓扑结构异常（顶点度异常）
+            neighbors = self.adjacency[i]
+            if len(neighbors) < 3 or len(neighbors) > 8:
+                singularities.append(i)
+                continue
+        
+        print(f"检测到 {len(singularities)} 个奇点")
+        return singularities
+    
+    def analyze_singularity_type(self, vertex_idx):
+        """
+        分析奇点类型
+        
+        Args:
+            vertex_idx: 顶点索引
+        Returns:
+            奇点类型字符串
+        """
+        if vertex_idx >= len(self.vertices):
+            return "invalid"
+        
+        # 分析曲率
+        if hasattr(self, 'curvatures'):
+            curvature = self.curvatures[vertex_idx]
+        else:
+            curvature = 0.0
+        
+        # 分析法向量变化率
+        neighbors = self.adjacency[vertex_idx]
+        normal_variation = 0.0
+        if len(neighbors) >= 3:
+            current_normal = self.vertex_normals[vertex_idx]
+            total_angle = 0.0
+            for neighbor in neighbors:
+                neighbor_normal = self.vertex_normals[neighbor]
+                dot_product = np.dot(current_normal, neighbor_normal)
+                dot_product = np.clip(dot_product, -1.0, 1.0)
+                angle = np.arccos(dot_product)
+                total_angle += angle
+            normal_variation = total_angle / len(neighbors)
+        
+        # 分析主曲率
+        k1, k2 = 0.0, 0.0
+        if hasattr(self, 'principal_curvatures'):
+            k1, k2 = self.principal_curvatures[vertex_idx]
+        
+        # 分析拓扑结构
+        degree = len(neighbors)
+        
+        # 判定奇点类型
+        if curvature > 1.0:
+            if abs(k1) > abs(k2) * 10:
+                return "sharp_edge"
+            elif abs(k2) > abs(k1) * 10:
+                return "sharp_edge"
+            else:
+                return "sharp_vertex"
+        elif normal_variation > 0.5:
+            return "normal_discontinuity"
+        elif degree < 3:
+            return "low_degree"
+        elif degree > 8:
+            return "high_degree"
+        elif abs(k1) > 10.0 or abs(k2) > 10.0:
+            return "extreme_curvature"
+        else:
+            return "unknown"
+    
+    def get_singularity_info(self):
+        """
+        获取所有奇点的信息
+        
+        Returns:
+            奇点信息字典
+        """
+        singularities = self.detect_singularities()
+        singularity_info = {}
+        
+        for idx in singularities:
+            singularity_type = self.analyze_singularity_type(idx)
+            singularity_info[idx] = {
+                'type': singularity_type,
+                'position': self.vertices[idx].tolist(),
+                'curvature': self.curvatures[idx] if hasattr(self, 'curvatures') else 0.0,
+                'normal': self.vertex_normals[idx].tolist(),
+                'num_normals': len(self.multiple_normals[idx])
+            }
+        
+        return singularity_info

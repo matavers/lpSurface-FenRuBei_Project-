@@ -16,39 +16,58 @@
 
 ## 核心组件
 
-### 1. NURBS曲面处理器 (`utils/nurbsSurfaceProcessor.py`)
+### 1. 网格处理器 (`core/meshProcessor.py`)
 
 **功能**：
-- 创建测试NURBS曲面
-- 计算曲面上任意点的坐标
-- 计算法向量
-- 计算高斯曲率和主曲率
-- 从曲面采样点云（支持均匀采样和自适应采样）
-- 将点云转换为三角网格
+- 处理网格数据，提取顶点、面和邻接关系
+- 计算几何属性（曲率、法向量等）
+- 计算面面积和顶点面积
+- 计算最大切削宽度
+- 计算直纹面逼近误差
 
 **使用示例**：
 ```python
-from utils.nurbsSurfaceProcessor import NURBSSurfaceProcessor
+from core.meshProcessor import MeshProcessor
+import open3d as o3d
 
-# 创建处理器
-processor = NURBSSurfaceProcessor()
+# 加载或创建网格
+mesh = o3d.io.read_triangle_mesh("model.obj")
 
-# 创建测试曲面
-surface = processor.create_test_surface()
+# 创建网格处理器
+mesh_processor = MeshProcessor(mesh)
 
-# 采样点云
-points, normals, curvatures, principal_curvatures = processor.sample_points(
-    resolution_u=30,
-    resolution_v=30,
-    adaptive=True,
-    curvature_threshold=0.1
-)
-
-# 创建网格
-mesh = processor.create_mesh()
+# 计算几何属性
+mesh_processor.calculate_max_cutting_width(tool)
+mesh_processor.calculate_rolled_error()
 ```
 
-### 2. 指标计算器 (`core/indicatorCalculator.py`)
+### 2. 非球面刀具模型 (`core/nonSphericalTool.py`)
+
+**功能**：
+- 支持多种刀具类型（椭球形、圆柱形、球形、锥形、自定义）
+- 生成刀具轮廓曲线
+- 计算有效切削半径
+- 执行碰撞检测
+- 计算切削宽度
+
+**使用示例**：
+```python
+from core.nonSphericalTool import NonSphericalTool
+
+# 创建椭球形刀具
+tool = NonSphericalTool(
+    profile_type='ellipsoidal',
+    params={'semi_axes': [9.0, 3.0], 'shank_diameter': 6.0, 'tool_length': 50.0}
+)
+
+# 计算有效切削半径
+effective_radius = tool.calculate_effective_radius(gamma=0.5, tilt_angle=0.1)
+
+# 执行碰撞检测
+is_collision = tool.check_collision_simple(surface_point, surface_normal, tool_orientation)
+```
+
+### 3. 指标计算器 (`core/indicatorCalculator.py`)
 
 **功能**：
 - 计算TAR（Tool Accessible Region）
@@ -71,15 +90,15 @@ developable_sim = calculator.calculate_developable_surface_error_similarity(0, 1
 combined_sim = calculator.calculate_combined_similarity(0, 1)
 ```
 
-### 3. 高级表面分区器 (`core/advancedSurfacePartitioner.py`)
+### 4. 高级表面分区器 (`core/advancedSurfacePartitioner.py`)
 
 **功能**：
 - 构建基于新指标的加权邻接矩阵
 - 执行Leiden聚类分区
-- 应用对称性约束
-- 拟合分区边界
-- 执行二次分区（可选）
+- 执行谱聚类（可选）
+- 检测和应用对称性约束（旋转、平移、反射、螺旋）
 - 确保分区连通性
+- 提取分区边界中点
 
 **使用示例**：
 ```python
@@ -90,14 +109,56 @@ partitioner = AdvancedSurfacePartitioner(
     mesh_processor,
     tool,
     resolution=0.1,
-    enable_secondary_partitioning=True  # 启用二次分区
+    alpha=0.3,
+    global_field='rolled_error',
+    symmetry_types=['rotation', 'reflection']
 )
 
 # 执行分区
-labels, edge_midpoints = partitioner.partition_surface()
+labels, edge_midpoints = partitioner.partition_surface(clustering_method='leiden')
 ```
 
-### 4. 路径生成器 (`core/pathGenerator.py`)
+### 5. 工具方向场生成器 (`core/toolOrientationField.py`)
+
+**功能**：
+- 为每个分区选择种子点
+- 贪心算法选择每个顶点的TAR
+- 拉普拉斯平滑方向场
+- 局部重定向确保方向在TAR内
+
+**使用示例**：
+```python
+from core.toolOrientationField import ToolOrientationField
+
+# 创建方向场生成器
+orientation_field = ToolOrientationField(mesh_processor, partition_labels, tool)
+
+# 生成工具方向场
+tool_orientations = orientation_field.generate_field()
+```
+
+### 6. 等残留高度场生成器 (`core/isoScallopField.py`)
+
+**功能**：
+- 计算等残留高度的标量场
+- 从标量场提取等值线
+- 优化等值线顺序
+
+**使用示例**：
+```python
+from core.isoScallopField import IsoScallopFieldGenerator
+
+# 创建等残留高度场生成器
+scallop_field = IsoScallopFieldGenerator(mesh_processor, tool_orientations, tool)
+
+# 计算标量场
+scalar_field = scallop_field.calculate_scallop_field()
+
+# 提取等值线
+iso_curves = scallop_field.extract_iso_curves(scalar_field)
+```
+
+### 7. 路径生成器 (`core/pathGenerator.py`)
 
 **功能**：
 - 连接等值线形成连续路径
@@ -120,15 +181,43 @@ tool_paths = path_generator.generate_final_path()
 path_generator.export_to_gcode(tool_paths['paths'], 'output.gcode')
 ```
 
+### 8. NURBS曲面处理器 (`core/nurbsProcessor.py`)
+
+**功能**：
+- 创建标准NURBS曲面（圆柱、球面、圆锥）
+- 计算曲面上任意点的坐标
+- 计算法向量和导数
+- 计算高斯曲率和主曲率
+- 生成网格表示
+- 可视化NURBS曲面
+- 保存和加载NURBS数据
+
+**使用示例**：
+```python
+from core.nurbsProcessor import NURBSProcessor
+
+# 创建圆柱面
+cylinder = NURBSProcessor.create_cylinder(radius=1.0, height=2.0)
+
+# 计算曲面上的点
+point = cylinder.evaluate(u=0.5, v=0.5)
+
+# 计算高斯曲率
+gaussian_curvature = cylinder.calculate_gaussian_curvature(u=0.5, v=0.5)
+
+# 可视化曲面
+cylinder.visualize(resolution_u=50, resolution_v=20)
+```
+
 ## 完整工作流
 
-**脚本**：`scripts/new_algorithm_workflow.py`
+**脚本**：`main.py`
 
 **功能**：实现从NURBS曲面到刀具路径的完整流程
 
 **运行方式**：
 ```bash
-python scripts/new_algorithm_workflow.py
+python main.py
 ```
 
 **输出**：
@@ -142,38 +231,61 @@ python scripts/new_algorithm_workflow.py
 
 **测试NURBS曲面处理器**：
 ```bash
-python -c "from utils.nurbsSurfaceProcessor import NURBSSurfaceProcessor; processor = NURBSSurfaceProcessor(); surface = processor.create_test_surface(); points, normals, curvatures, principal_curvatures = processor.sample_points(resolution_u=20, resolution_v=20, adaptive=False); print('NURBS处理器测试成功')"
+python tests/test_nurbs.py
 ```
 
-**测试指标计算器**：
+**测试圆锥曲面**：
 ```bash
-python -c "from core.meshProcessor import MeshProcessor; from core.nonSphericalTool import NonSphericalTool; from core.indicatorCalculator import IndicatorCalculator; import numpy as np; import open3d as o3d; pcd = o3d.geometry.PointCloud(); pcd.points = o3d.utility.Vector3dVector(np.random.rand(100, 3)); mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=5); mesh_processor = MeshProcessor(mesh); mesh_processor.gaussian_curvatures = np.random.rand(100); mesh_processor.principal_curvatures = np.random.rand(100, 2); mesh_processor.rolled_error = np.random.rand(100); tool = NonSphericalTool(profile_type='ellipsoidal', params={'semi_axes': [1.0, 0.5]}); calculator = IndicatorCalculator(mesh_processor, tool); sim = calculator.calculate_combined_similarity(0, 1); print('指标计算器测试成功')"
+python tests/test_cone_surface.py
+```
+
+**测试球体曲面**：
+```bash
+python tests/test_sphere_surface.py
+```
+
+**测试环面曲面**：
+```bash
+python tests/test_torus_surface.py
+```
+
+**测试鞍面曲面**：
+```bash
+python tests/test_saddle_surface.py
 ```
 
 ### 2. 集成测试
 
 **运行完整工作流**：
 ```bash
-python scripts/new_algorithm_workflow.py
+python main.py
 ```
 
 ## 配置参数
 
-### NURBS曲面处理器参数
-- `resolution_u`：u方向的采样分辨率
-- `resolution_v`：v方向的采样分辨率
-- `adaptive`：是否使用自适应采样
-- `curvature_threshold`：曲率阈值，用于自适应采样
+### 网格处理器参数
+- 无需额外参数，自动从网格提取数据
+
+### 非球面刀具参数
+- `profile_type`：刀具轮廓类型 ('ellipsoidal', 'cylindrical', 'spherical', 'conical', 'custom')
+- `params`：刀具参数，根据类型不同而不同
 
 ### 高级表面分区器参数
 - `resolution`：聚类分辨率参数，控制分区数量
-- `enable_secondary_partitioning`：是否启用二次分区
+- `alpha`：全局引导强度参数，范围[0,1]
+- `global_field`：全局场类型，可选值：'rolled_error', 'curvature', 'cutting_width'
+- `symmetry_types`：对称性类型列表，可选值：'rotation', 'translation', 'reflection', 'helical', 'combined'
 
 ### 指标计算器参数
 - `sigma_k`：高斯曲率相似性的带宽参数
 - `sigma_n`：几何连续性相似性的法向变化带宽参数
 - `sigma_r`：直纹面逼近误差相似性的带宽参数
 - `weights`：综合相似性的权重 (高斯曲率权重, 几何连续性权重, 直纹面误差权重)
+
+### NURBS处理器参数
+- `radius`：半径
+- `height`：高度
+- `resolution`：控制点分辨率
 
 ## 注意事项
 
@@ -186,12 +298,13 @@ python scripts/new_algorithm_workflow.py
    - networkx
    - leidenalg (可选，用于Leiden聚类)
    - igraph (可选，用于Leiden聚类)
+   - mathutils
 
 ## 常见问题
 
-1. **NURBS曲面创建失败**：检查控制点格式是否正确
+1. **NURBS曲面创建失败**：检查参数是否正确
 2. **分区数量过多**：调整`resolution`参数
-3. **二次分区不执行**：确保`enable_secondary_partitioning`为True，且分区大小足够大
+3. **对称性检测失败**：确保模型具有明显的对称性
 4. **刀具路径生成失败**：检查网格质量和分区结果
 
 ## 性能优化
@@ -209,6 +322,7 @@ python scripts/new_algorithm_workflow.py
 3. **优化对称性检测**：进一步改进对称性检测的性能和准确性
 4. **更多刀具类型支持**：扩展对不同刀具类型的支持
 5. **G代码生成优化**：改进G代码生成的质量和效率
+6. **GUI界面**：开发图形用户界面，提高用户体验
 
 ## 联系信息
 

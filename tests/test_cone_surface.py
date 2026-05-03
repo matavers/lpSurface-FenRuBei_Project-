@@ -6,6 +6,90 @@
 import numpy as np
 import os
 import sys
+import time
+
+
+def evaluate_path_smoothness(path_points):
+    """
+    计算路径平滑度
+    Args:
+        path_points: 路径点列表 (numpy array)
+    Returns:
+        smoothness: 平滑度评分 (0-1，越高越平滑)
+        avg_curvature: 平均曲率
+    """
+    if len(path_points) < 3:
+        return 1.0, 0.0
+    
+    total_curvature = 0.0
+    num_segments = 0
+    
+    for i in range(1, len(path_points) - 1):
+        p_prev = path_points[i-1]
+        p_curr = path_points[i]
+        p_next = path_points[i+1]
+        
+        v1 = p_curr - p_prev
+        v2 = p_next - p_curr
+        
+        cross_norm = np.linalg.norm(np.cross(v1, v2))
+        norm_v1 = np.linalg.norm(v1)
+        norm_v2 = np.linalg.norm(v2)
+        norm_v3 = np.linalg.norm(p_next - p_prev)
+        
+        if norm_v1 < 1e-12 or norm_v2 < 1e-12 or norm_v3 < 1e-12:
+            continue
+        
+        curvature = cross_norm / (norm_v1 * norm_v2 * norm_v3)
+        total_curvature += curvature
+        num_segments += 1
+    
+    if num_segments == 0:
+        return 1.0, 0.0
+    
+    avg_curvature = total_curvature / num_segments
+    smoothness = 1.0 / (1.0 + avg_curvature * 100)
+    return smoothness, avg_curvature
+
+
+def evaluate_tool_orientation_change(orientations):
+    """
+    计算方向稳定性
+    Args:
+        orientations: 方向向量列表 (numpy array)
+    Returns:
+        stability: 稳定性评分 (0-1，越高越稳定)
+        avg_angle_change: 平均角度变化 (弧度)
+    """
+    if len(orientations) < 2:
+        return 1.0, 0.0
+    
+    total_angle_change = 0.0
+    num_transitions = 0
+    
+    for i in range(1, len(orientations)):
+        o_prev = orientations[i-1]
+        o_curr = orientations[i]
+        
+        norm_prev = np.linalg.norm(o_prev)
+        norm_curr = np.linalg.norm(o_curr)
+        
+        if norm_prev < 1e-12 or norm_curr < 1e-12:
+            continue
+        
+        dot_product = np.dot(o_prev, o_curr) / (norm_prev * norm_curr)
+        dot_product = np.clip(dot_product, -1.0, 1.0)
+        angle = np.arccos(dot_product)
+        
+        total_angle_change += angle
+        num_transitions += 1
+    
+    if num_transitions == 0:
+        return 1.0, 0.0
+    
+    avg_angle_change = total_angle_change / num_transitions
+    stability = 1.0 / (1.0 + avg_angle_change * 10)
+    return stability, avg_angle_change
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -194,17 +278,19 @@ def compute_vertex_properties(mesh, vertex_params, height=2.0, radius=1.0):
     return np.array(normals), np.array(gaussian_curvatures), np.array(principal_curvatures)
 
 
-def run_test():
+def run_test(height=2.0, radius=1.0, resolution=40, symmetry_types_list=None):
     """
     运行圆锥面测试
+    Args:
+        height: 圆锥高度
+        radius: 圆锥底面半径
+        resolution: 网格分辨率（角度方向采样数）
+        symmetry_types_list: 要测试的对称性类型列表
     """
     print("=== 圆锥面测试 ===")
     
     # 1. 直接生成圆锥面网格
     print("1. 直接生成圆锥面网格...")
-    height = 2.0
-    radius = 1.0
-    resolution = 40  # 控制网格密度，减少到约2000个顶点
     print(f"设置分辨率: {resolution}")
     mesh, vertex_params = create_cone_mesh(height, radius, resolution)
     num_vertices = len(mesh.vertices)
@@ -240,17 +326,20 @@ def run_test():
     # 6. 创建分区器
     print("6. 创建分区器...")
     # 测试不同的对称性类型
-    symmetry_types_list = [
-        None,  # 无对称性（使用原有算法）
-        ['rotation'],  # 旋转对称
-        ['combined']  # 组合对称性
-    ]
+    if symmetry_types_list is None:
+        symmetry_types_list = [
+            None,  # 无对称性（使用原有算法）
+            ['rotation'],  # 旋转对称
+            ['combined']  # 组合对称性
+        ]
     
     for symmetry_types in symmetry_types_list:
         print(f"\n--- 测试对称性类型: {symmetry_types} ---")
         
+        # 记录总开始时间
+        overall_start_time = time.time()
+        
         # 记录开始时间
-        import time
         start_time = time.time()
         
         print(f"创建分区器...")
@@ -281,16 +370,20 @@ def run_test():
         # 8.1 生成刀具方向场
         print("   8.1 生成刀具方向场...")
         from core.toolOrientationField import ToolOrientationField
+        orientation_start_time = time.time()
         orientation_field = ToolOrientationField(
             mesh_processor,
             labels,
             tool
         )
         tool_orientations = orientation_field.generate_field()
+        orientation_time = time.time() - orientation_start_time
+        print(f"   方向场生成耗时: {orientation_time:.2f}秒")
         
         # 8.2 生成等残留高度场
         print("   8.2 生成等残留高度场...")
         from core.isoScallopField import IsoScallopFieldGenerator
+        scalar_field_start_time = time.time()
         iso_scallop_generator = IsoScallopFieldGenerator(
             mesh_processor,
             tool_orientations,
@@ -298,6 +391,8 @@ def run_test():
             scallop_height=0.05  # 设置残留高度
         )
         scalar_field = iso_scallop_generator.generate_scalar_field()
+        scalar_field_time = time.time() - scalar_field_start_time
+        print(f"   标量场生成耗时: {scalar_field_time:.2f}秒")
         
         # 统计残留高度数据
         if scalar_field is not None and len(scalar_field) > 0:
@@ -313,10 +408,13 @@ def run_test():
         
         # 8.3 提取等值线
         print("   8.3 提取等值线...")
+        iso_curves_start_time = time.time()
         iso_curves = iso_scallop_generator.extract_iso_curves(scalar_field)
+        iso_curves_time = time.time() - iso_curves_start_time
         
         # 8.4 使用PathGenerator生成最终刀具路径
         print("   8.4 使用PathGenerator生成刀具路径...")
+        path_gen_start_time = time.time()
         path_generator = PathGenerator(
             mesh_processor,
             iso_curves,
@@ -324,16 +422,23 @@ def run_test():
             tool
         )
         tool_paths = path_generator.generate_final_path()
+        path_gen_time = time.time() - path_gen_start_time
+        print(f"   路径生成耗时: {path_gen_time:.2f}秒")
         
         print(f"   生成了 {len(tool_paths['paths'])} 条刀具路径")
         
         # 9. 计算路径总长度和质量指标
         total_length = 0
         path_lengths = []
-        path_smoothness = []
+        path_smoothness_scores = []
+        path_avg_curvatures = []
+        orientation_stability_scores = []
+        orientation_avg_angle_changes = []
+        total_path_points = 0
         
         for path_data in tool_paths['paths']:
             path_points = path_data['points']
+            total_path_points += len(path_points)
             if len(path_points) < 2:
                 continue
             
@@ -345,26 +450,35 @@ def run_test():
             total_length += path_length
             path_lengths.append(path_length)
             
-            # 计算路径平滑度（相邻线段的角度变化）
+            # 计算路径平滑度（使用新的曲率方法）
             if len(path_points) >= 3:
-                smoothness_sum = 0
-                for i in range(1, len(path_points) - 1):
-                    v1 = np.array(path_points[i]) - np.array(path_points[i-1])
-                    v2 = np.array(path_points[i+1]) - np.array(path_points[i])
-                    if np.linalg.norm(v1) > 1e-6 and np.linalg.norm(v2) > 1e-6:
-                        cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-                        cos_theta = np.clip(cos_theta, -1, 1)
-                        angle = np.arccos(cos_theta)
-                        smoothness_sum += angle
-                avg_smoothness = smoothness_sum / (len(path_points) - 2) if (len(path_points) - 2) > 0 else 0
-                path_smoothness.append(avg_smoothness)
+                smoothness, avg_curvature = evaluate_path_smoothness(path_points)
+                path_smoothness_scores.append(smoothness)
+                path_avg_curvatures.append(avg_curvature)
+            
+            # 计算方向稳定性
+            orientations = path_data.get('orientations', [])
+            if orientations is not None and len(orientations) >= 2:
+                stability, avg_angle_change = evaluate_tool_orientation_change(orientations)
+                orientation_stability_scores.append(stability)
+                orientation_avg_angle_changes.append(avg_angle_change)
         
         # 计算路径质量指标
         avg_path_length = np.mean(path_lengths) if path_lengths else 0
-        avg_smoothness = np.mean(path_smoothness) if path_smoothness else 0
+        avg_smoothness_score = np.mean(path_smoothness_scores) if path_smoothness_scores else 0
+        avg_path_curvature = np.mean(path_avg_curvatures) if path_avg_curvatures else 0
+        avg_orientation_stability = np.mean(orientation_stability_scores) if orientation_stability_scores else 0
+        avg_orientation_angle_change = np.mean(orientation_avg_angle_changes) if orientation_avg_angle_changes else 0
+        
+        # 计算总运行时间
+        overall_time = time.time() - overall_start_time
         
         print(f"刀具路径生成完成: {len(tool_paths['paths'])} 条路径, 总长度 {total_length:.2f} mm")
-        print(f"路径质量: 平均路径长度={avg_path_length:.2f} mm, 平均平滑度={avg_smoothness:.4f} rad")
+        print(f"路径质量: 平均路径长度={avg_path_length:.2f} mm, 路径平滑度={avg_smoothness_score:.4f}, 平均曲率={avg_path_curvature:.6f}")
+        print(f"方向稳定性: 稳定性评分={avg_orientation_stability:.4f}, 平均角度变化={avg_orientation_angle_change:.6f} rad")
+        print(f"路径点总数: {total_path_points}")
+        print(f"各阶段耗时: 方向场={orientation_time:.2f}s, 标量场={scalar_field_time:.2f}s, 等值线={iso_curves_time:.2f}s, 路径生成={path_gen_time:.2f}s")
+        print(f"总运行时间: {overall_time:.2f}秒")
         
         # 10. 可视化结果
         print("10. 可视化结果...")
@@ -468,11 +582,20 @@ def run_test():
             'num_tool_paths': len(tool_paths['paths']),
             'total_path_length': total_length,
             'avg_path_length': avg_path_length,
-            'avg_smoothness': avg_smoothness,
+            'avg_smoothness': avg_smoothness_score,
+            'avg_path_curvature': avg_path_curvature,
+            'avg_orientation_stability': avg_orientation_stability,
+            'avg_orientation_angle_change': avg_orientation_angle_change,
+            'total_path_points': total_path_points,
             'max_scallop': max_scallop,
             'avg_scallop': avg_scallop,
             'std_scallop': std_scallop,
             'partition_time': partition_time,
+            'orientation_time': orientation_time,
+            'scalar_field_time': scalar_field_time,
+            'iso_curves_time': iso_curves_time,
+            'path_gen_time': path_gen_time,
+            'total_time': overall_time,
             'num_vertices': len(mesh.vertices),
             'num_triangles': len(mesh.triangles),
             'symmetry_types': symmetry_types if symmetry_types else []

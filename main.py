@@ -84,6 +84,12 @@ class FiveAxisMachiningSystem:
                 'tolerance': 1e-4,
                 'tar_sampling_resolution': 30
             },
+            'normal_calculation': {
+                'use_analytical': False,  # 是否使用解析法计算法向量
+                'nurbs_file_path': None,  # NURBS参数文件路径
+                'c1_continuity_partition': True,  # 是否基于C1连续性进行分区
+                'normal_variation_threshold': 0.1  # 法向量变化率阈值
+            },
             'visualization': {
                 'show_partitions': True,
                 'show_orientations': True,
@@ -177,8 +183,46 @@ class FiveAxisMachiningSystem:
 
             # 计算法线
             print("计算网格法线...")
-            self.mesh.compute_vertex_normals()
-            self.mesh.compute_triangle_normals()
+            
+            # 检查是否使用解析法计算法向量
+            use_analytical_normal = self.config['normal_calculation']['use_analytical']
+            nurbs_file_path = self.config['normal_calculation']['nurbs_file_path']
+            
+            if use_analytical_normal and nurbs_file_path and os.path.exists(nurbs_file_path):
+                print("使用解析法计算法向量...")
+                # 从文件加载NURBS参数
+                from core.nurbsProcessor import NURBSProcessor
+                try:
+                    nurbs_processor = NURBSProcessor.load_nurbs_data(nurbs_file_path)
+                    print(f"成功加载NURBS参数文件: {nurbs_file_path}")
+                    
+                    # 为每个顶点计算解析法向量
+                    vertices = np.asarray(self.mesh.vertices)
+                    normals = []
+                    
+                    # 这里需要根据实际情况将顶点坐标映射到NURBS参数空间
+                    # 简化实现：使用最近点的参数
+                    for vertex in vertices:
+                        # 这里需要实现顶点到NURBS参数的映射
+                        # 简化实现：使用默认参数
+                        u, v = 0.5, 0.5
+                        normal = nurbs_processor.calculate_normal(u, v)
+                        normals.append(normal)
+                    
+                    # 设置法向量
+                    self.mesh.vertex_normals = o3d.utility.Vector3dVector(np.array(normals))
+                    self.mesh.compute_triangle_normals()
+                    print("解析法向量计算完成")
+                except Exception as e:
+                    print(f"解析法向量计算失败: {e}")
+                    print("回退到Open3D默认法向量计算...")
+                    self.mesh.compute_vertex_normals()
+                    self.mesh.compute_triangle_normals()
+            else:
+                # 使用Open3D默认法向量计算
+                self.mesh.compute_vertex_normals()
+                self.mesh.compute_triangle_normals()
+                print("Open3D默认法向量计算完成")
 
             # 简化网格
             if len(self.mesh.vertices) > 10000:
@@ -233,8 +277,46 @@ class FiveAxisMachiningSystem:
 
             # 计算法线
             print("计算网格法线...")
-            self.mesh.compute_vertex_normals()
-            self.mesh.compute_triangle_normals()
+            
+            # 检查是否使用解析法计算法向量
+            use_analytical_normal = self.config['normal_calculation']['use_analytical']
+            nurbs_file_path = self.config['normal_calculation']['nurbs_file_path']
+            
+            if use_analytical_normal and nurbs_file_path and os.path.exists(nurbs_file_path):
+                print("使用解析法计算法向量...")
+                # 从文件加载NURBS参数
+                from core.nurbsProcessor import NURBSProcessor
+                try:
+                    nurbs_processor = NURBSProcessor.load_nurbs_data(nurbs_file_path)
+                    print(f"成功加载NURBS参数文件: {nurbs_file_path}")
+                    
+                    # 为每个顶点计算解析法向量
+                    vertices = np.asarray(self.mesh.vertices)
+                    normals = []
+                    
+                    # 这里需要根据实际情况将顶点坐标映射到NURBS参数空间
+                    # 简化实现：使用最近点的参数
+                    for vertex in vertices:
+                        # 这里需要实现顶点到NURBS参数的映射
+                        # 简化实现：使用默认参数
+                        u, v = 0.5, 0.5
+                        normal = nurbs_processor.calculate_normal(u, v)
+                        normals.append(normal)
+                    
+                    # 设置法向量
+                    self.mesh.vertex_normals = o3d.utility.Vector3dVector(np.array(normals))
+                    self.mesh.compute_triangle_normals()
+                    print("解析法向量计算完成")
+                except Exception as e:
+                    print(f"解析法向量计算失败: {e}")
+                    print("回退到Open3D默认法向量计算...")
+                    self.mesh.compute_vertex_normals()
+                    self.mesh.compute_triangle_normals()
+            else:
+                # 使用Open3D默认法向量计算
+                self.mesh.compute_vertex_normals()
+                self.mesh.compute_triangle_normals()
+                print("Open3D默认法向量计算完成")
 
             # 简化网格
             if len(self.mesh.vertices) > 10000:
@@ -347,8 +429,37 @@ class FiveAxisMachiningSystem:
         # 暂时使用一个简单的适配器，未来可以加入更多的底层库或者加强对Open3D网格的支持
         self.mesh_processor = MeshProcessor(self.mesh)
         
-
+        # 检测奇点并处理
+        print("\n检测奇点并处理...")
+        singularities = self.mesh_processor.detect_singularities()
+        singularity_info = self.mesh_processor.get_singularity_info()
         
+        # 为奇点添加多个法向量
+        if singularities:
+            print(f"为 {len(singularities)} 个奇点添加多个法向量...")
+            for idx in singularities:
+                # 为奇点添加多个可能的法向量
+                # 基于奇点类型生成不同的法向量
+                singularity_type = singularity_info[idx]['type']
+                
+                # 获取当前法向量
+                current_normal = self.mesh_processor.get_normal(idx)
+                
+                # 添加几个不同方向的法向量
+                # 基于当前法向量生成扰动法向量
+                for i in range(4):
+                    # 生成随机扰动
+                    perturbation = np.random.normal(0, 0.1, 3)
+                    new_normal = current_normal + perturbation
+                    # 归一化
+                    norm = np.linalg.norm(new_normal)
+                    if norm > 1e-8:
+                        new_normal = new_normal / norm
+                        self.mesh_processor.add_normal(idx, new_normal)
+        
+        # 更新网格法向量，确保可视化时使用最新的法向量
+        self.mesh_processor.update_mesh_normals()
+
         return self.mesh_processor
 
     def setup_tool(self):
@@ -396,17 +507,30 @@ class FiveAxisMachiningSystem:
         print("使用新的基于算法version2的分区器")
         print(f"使用分区算法: {partition_algorithm}")
 
-        # 映射分区算法名称到聚类方法
-        clustering_method_map = {
-            "leiden": "leiden",
-            "spectral": "spectral",
-            "community": "alternative"
-        }
-        clustering_method = clustering_method_map.get(partition_algorithm, "leiden")
+        # 检查是否使用C1连续性分区
+        use_c1_partition = self.config['normal_calculation']['c1_continuity_partition']
+        normal_threshold = self.config['normal_calculation']['normal_variation_threshold']
+        
+        if use_c1_partition:
+            print(f"使用C1连续性分区，阈值: {normal_threshold}")
+            # 基于C1连续性进行分区
+            start_time = time.time()
+            partition_labels = self.partitioner.partition_by_c1_continuity(threshold=normal_threshold)
+            # 提取边缘中点
+            edge_midpoints = []  # 暂时为空，后续可以实现
+            partition_time = time.time() - start_time
+        else:
+            # 映射分区算法名称到聚类方法
+            clustering_method_map = {
+                "leiden": "leiden",
+                "spectral": "spectral",
+                "community": "alternative"
+            }
+            clustering_method = clustering_method_map.get(partition_algorithm, "leiden")
 
-        start_time = time.time()
-        partition_labels, edge_midpoints = self.partitioner.partition_surface(clustering_method=clustering_method)
-        partition_time = time.time() - start_time
+            start_time = time.time()
+            partition_labels, edge_midpoints = self.partitioner.partition_surface(clustering_method=clustering_method)
+            partition_time = time.time() - start_time
 
         self.results['partition_labels'] = partition_labels
         self.results['edge_midpoints'] = edge_midpoints
@@ -557,6 +681,11 @@ class FiveAxisMachiningSystem:
                 self.results['tool_orientations'],
                 scale=vis_config['orientation_scale']
             )
+
+        # 可视化奇点
+        singularity_info = self.mesh_processor.get_singularity_info()
+        if singularity_info:
+            self.visualizer.visualize_singularities(self.mesh, singularity_info)
 
         if vis_config['show_paths'] and self.results['tool_paths'] is not None:
             self.visualizer.visualize_tool_paths(
@@ -1063,7 +1192,16 @@ class FiveAxisMachiningSystem:
 
 # 脚本配置开关
 if __name__ == "__main__":
-    # 1. 采样建模开关
+    # 0. 圆锥面测试开关
+    run_cone_test = False  # True: 运行圆锥面测试, False: 运行常规处理流程
+    
+    # 圆锥面测试配置
+    cone_height = 2.0
+    cone_radius = 1.0
+    cone_resolution = 40
+    cone_symmetry_types_list = [None, ['rotation'], ['combined']]  # 测试不同对称性类型
+    
+    # 1. 采样建模开关（圆锥面测试关闭时使用）
     use_sampling = False  # True: 使用采样建模, False: 使用文件路径
     
     # 2. 文件路径（当use_sampling=False时必须指定）
@@ -1089,7 +1227,34 @@ if __name__ == "__main__":
     developable_error_threshold = 0.01  # 直纹面逼近误差阈值
     uniform_sampling = False  # 是否使用均匀采样
     
-    # 验证配置
+    # 检查是否运行圆锥面测试
+    if run_cone_test:
+        print("=" * 50)
+        print("运行圆锥面测试")
+        print("=" * 50)
+        
+        # 添加项目根目录到Python路径
+        import sys
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        
+        # 导入并运行圆锥面测试
+        try:
+            from tests.test_cone_surface import run_test
+            run_test(
+                height=cone_height,
+                radius=cone_radius,
+                resolution=cone_resolution,
+                symmetry_types_list=cone_symmetry_types_list
+            )
+            print("\n圆锥面测试完成!")
+        except Exception as e:
+            print(f"圆锥面测试运行失败: {e}")
+            import traceback
+            traceback.print_exc()
+        exit(0)
+    
+    # 验证配置（圆锥面测试关闭时使用）
     if use_sampling:
         if mesh_algorithm == "obj":
             print("错误: 当use_sampling=True时，mesh_algorithm不能为obj")
