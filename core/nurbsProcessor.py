@@ -33,10 +33,39 @@ class NURBSProcessor:
         else:
             self.weights = weights
         
+        # 输入验证：检查knot vector 长度是否正确
+        n_u = control_points.shape[0]
+        n_v = control_points.shape[1]
+        expected_len_u = n_u + degree_u + 1
+        expected_len_v = n_v + degree_v + 1
+        if len(knots_u) != expected_len_u:
+            raise ValueError(f"knots_u 长度错误：期望{expected_len_u}，实际{len(knots_u)} (控制点数{n_u}+次{degree_u}+1)")
+        if len(knots_v) != expected_len_v:
+            raise ValueError(f"knots_v 长度错误：期望{expected_len_v}，实际{len(knots_v)} (控制点数{n_v}+次{degree_v}+1)")
+
         # 预计算基函数值
         self.precomputed_basis = {}
         
         print(f"NURBS曲面初始化完成: {control_points.shape[0]}x{control_points.shape[1]} 控制点, 次数: {degree_u}x{degree_v}")
+
+    def param_domain(self) -> Tuple[float, float, float, float]:
+        """返回有效参数域 (u_min, u_max, v_min, v_max)。"""
+        u_min = float(self.knots_u[self.degree_u])
+        u_max = float(self.knots_u[-self.degree_u - 1])
+        v_min = float(self.knots_v[self.degree_v])
+        v_max = float(self.knots_v[-self.degree_v - 1])
+        return u_min, u_max, v_min, v_max
+
+    def clamp_parameters(self, u: float, v: float, margin: float = 1e-4) -> Tuple[float, float]:
+        """将 (u,v) 裁剪到节点向量有效域内部，避免端点处权重和 W=0。"""
+        u_min, u_max, v_min, v_max = self.param_domain()
+        span_u = max(u_max - u_min, 1e-12)
+        span_v = max(v_max - v_min, 1e-12)
+        mu = margin * span_u
+        mv = margin * span_v
+        u_c = float(np.clip(u, u_min + mu, u_max - mu))
+        v_c = float(np.clip(v, v_min + mv, v_max - mv))
+        return u_c, v_c
     
     def save_nurbs_data(self, file_path: str):
         """
@@ -89,28 +118,98 @@ class NURBSProcessor:
         key = (degree, tuple(knots), i, u)
         if key in self.precomputed_basis:
             return self.precomputed_basis[key]
-        
+
         # 递归计算基函数
         if degree == 0:
-            value = 1.0 if knots[i] <= u < knots[i+1] else 0.0
+            n_knots = len(knots)
+            if i < 0 or i >= n_knots - 1:
+                return 0.0
+            if knots[i] == knots[i + 1]:
+                return 0.0
+            if knots[i] <= u < knots[i + 1]:
+                return 1.0
+            if u == knots[-1] and i == n_knots - 2:
+                return 1.0
+            return 0.0
         else:
             denom1 = knots[i+degree] - knots[i]
             denom2 = knots[i+degree+1] - knots[i+1]
-            
+
             term1 = 0.0
             if denom1 > 1e-8:
                 term1 = (u - knots[i]) / denom1 * self.basis_function(degree-1, knots, i, u)
-            
+            elif knots[i+degree] == knots[i] and u == knots[i+degree]:
+                term1 = 1.0
+
             term2 = 0.0
             if denom2 > 1e-8:
                 term2 = (knots[i+degree+1] - u) / denom2 * self.basis_function(degree-1, knots, i+1, u)
-            
+            elif knots[i+degree+1] == knots[i+1] and u == knots[i+degree+1]:
+                term2 = 1.0
+
             value = term1 + term2
-        
+
         # 保存预计算结果
         self.precomputed_basis[key] = value
         return value
-    
+
+    def basis_derivative(self, degree: int, knots: np.ndarray, i: int, u: float, order: int = 1) -> float:
+        """
+        计算B样条基函数的导数
+        Args:
+            degree: 样条次数
+            knots: 节点向量
+            i: 基函数索引
+            u: 参数值
+            order: 导数阶数 (0, 1, 2)
+        Returns:
+            基函数导数值
+        """
+        if order == 0:
+            return self.basis_function(degree, knots, i, u)
+
+        if order > 2:
+            raise NotImplementedError("Only up to second order derivatives are implemented")
+
+        if degree == 0:
+            return 0.0
+
+        denom1 = knots[i + degree] - knots[i]
+        denom2 = knots[i + degree + 1] - knots[i + 1]
+
+        term1 = 0.0
+        term2 = 0.0
+
+        if order == 1:
+            if denom1 > 1e-8:
+                term1 = degree / denom1 * self.basis_function(degree - 1, knots, i, u)
+            if denom2 > 1e-8:
+                term2 = degree / denom2 * self.basis_function(degree - 1, knots, i + 1, u)
+            return term1 - term2
+
+        elif order == 2:
+            if degree < 2:
+                return 0.0
+
+            d1 = knots[i + degree] - knots[i]
+            d2 = knots[i + degree + 1] - knots[i + 1]
+
+            term1 = 0.0
+            term2 = 0.0
+            term3 = 0.0
+            term4 = 0.0
+
+            if d1 > 1e-8:
+                term1 = (degree * (degree - 1)) / (d1 * d1) * self.basis_function(degree - 2, knots, i, u)
+            if d1 > 1e-8 and d2 > 1e-8:
+                term2 = (degree * (degree - 1)) / (d1 * d2) * self.basis_function(degree - 2, knots, i + 1, u)
+            if d2 > 1e-8 and d1 > 1e-8:
+                term3 = (degree * (degree - 1)) / (d2 * d1) * self.basis_function(degree - 2, knots, i + 1, u)
+            if d2 > 1e-8:
+                term4 = (degree * (degree - 1)) / (d2 * d2) * self.basis_function(degree - 2, knots, i + 2, u)
+
+            return term1 - term2 - term3 + term4
+
     def evaluate(self, u: float, v: float) -> np.ndarray:
         """
         计算NURBS曲面上指定参数点的值
@@ -120,25 +219,17 @@ class NURBSProcessor:
         Returns:
             点的坐标
         """
-        # 计算U方向的基函数
-        # 基函数数量 = 控制点数量 - 次数
+        u, v = self.clamp_parameters(u, v)
         n_u = self.control_points.shape[0]
-        basis_u = []
-        for i in range(n_u - self.degree_u):
-            basis_u.append(self.basis_function(self.degree_u, self.knots_u, i, u))
-        
-        # 计算V方向的基函数
         n_v = self.control_points.shape[1]
-        basis_v = []
-        for j in range(n_v - self.degree_v):
-            basis_v.append(self.basis_function(self.degree_v, self.knots_v, j, v))
-        
-        # 计算加权和
+        basis_u = [self.basis_function(self.degree_u, self.knots_u, i, u) for i in range(n_u)]
+        basis_v = [self.basis_function(self.degree_v, self.knots_v, j, v) for j in range(n_v)]
+
         weighted_sum = np.zeros(3)
         weight_sum = 0.0
-        
-        for i in range(len(basis_u)):
-            for j in range(len(basis_v)):
+
+        for i in range(n_u):
+            for j in range(n_v):
                 weight = self.weights[i, j]
                 basis = basis_u[i] * basis_v[j] * weight
                 weighted_sum += self.control_points[i, j] * basis
@@ -147,9 +238,115 @@ class NURBSProcessor:
         # 归一化
         if weight_sum > 1e-8:
             return weighted_sum / weight_sum
-        else:
-            return np.zeros(3)
-    
+        # 权重和过小：退回控制点网格中心，避免返回全零
+        return self.control_points.reshape(-1, 3).mean(axis=0)
+
+    def _evaluate_derivatives_finite_diff(self, u: float, v: float):
+        """W 过小或解析求导失败时，用中心差分近似导数。"""
+        u_min, u_max, v_min, v_max = self.param_domain()
+        span_u = max(u_max - u_min, 1e-12)
+        span_v = max(v_max - v_min, 1e-12)
+        h_u = max(1e-5, 1e-3 * span_u)
+        h_v = max(1e-5, 1e-3 * span_v)
+
+        def _du(uu: float, vv: float) -> np.ndarray:
+            return self.evaluate(uu, vv)
+
+        S = _du(u, v)
+        u_lo = max(u_min, u - h_u)
+        u_hi = min(u_max, u + h_u)
+        v_lo = max(v_min, v - h_v)
+        v_hi = min(v_max, v + h_v)
+        Su = (_du(u_hi, v) - _du(u_lo, v)) / max(u_hi - u_lo, 1e-12)
+        Sv = (_du(u, v_hi) - _du(u, v_lo)) / max(v_hi - v_lo, 1e-12)
+        Suu = (
+            _du(u_hi, v) - 2.0 * S + _du(u_lo, v)
+        ) / max(((u_hi - u_lo) * 0.5) ** 2, 1e-12)
+        Svv = (
+            _du(u, v_hi) - 2.0 * S + _du(u, v_lo)
+        ) / max(((v_hi - v_lo) * 0.5) ** 2, 1e-12)
+        Suv = (
+            _du(u_hi, v_hi) - _du(u_hi, v_lo) - _du(u_lo, v_hi) + _du(u_lo, v_lo)
+        ) / max((u_hi - u_lo) * (v_hi - v_lo), 1e-12)
+        return S, Su, Sv, Suu, Suv, Svv
+
+    def evaluate_derivatives(self, u: float, v: float):
+        """
+        计算NURBS曲面上指定参数点的一阶和二阶偏导数（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            (S, Su, Sv, Suu, Suv, Svv): 曲面点及其一阶、二阶偏导数
+        """
+        u, v = self.clamp_parameters(u, v)
+        n_u, n_v = self.control_points.shape[:2]
+
+        N = [self.basis_function(self.degree_u, self.knots_u, i, u) for i in range(n_u)]
+        Nu = [self.basis_derivative(self.degree_u, self.knots_u, i, u, 1) for i in range(n_u)]
+        Nuu = [self.basis_derivative(self.degree_u, self.knots_u, i, u, 2) for i in range(n_u)]
+
+        M = [self.basis_function(self.degree_v, self.knots_v, j, v) for j in range(n_v)]
+        Mv = [self.basis_derivative(self.degree_v, self.knots_v, j, v, 1) for j in range(n_v)]
+        Mvv = [self.basis_derivative(self.degree_v, self.knots_v, j, v, 2) for j in range(n_v)]
+
+        A = np.zeros(3)
+        W = 0.0
+        Au = np.zeros(3)
+        Wu = 0.0
+        Av = np.zeros(3)
+        Wv = 0.0
+        Auu = np.zeros(3)
+        Wuu = 0.0
+        Avv = np.zeros(3)
+        Wvv = 0.0
+        Auv = np.zeros(3)
+        Wuv = 0.0
+
+        for i in range(n_u):
+            for j in range(n_v):
+                w = self.weights[i, j]
+                P = self.control_points[i, j]
+                Nij = N[i] * M[j]
+                Niu = Nu[i] * M[j]
+                Njv = N[i] * Mv[j]
+                Niuu = Nuu[i] * M[j]
+                Njvv = N[i] * Mvv[j]
+                Niujv = Nu[i] * Mv[j]
+
+                A += P * (w * Nij)
+                W += w * Nij
+                Au += P * (w * Niu)
+                Wu += w * Niu
+                Av += P * (w * Njv)
+                Wv += w * Njv
+                Auu += P * (w * Niuu)
+                Wuu += w * Niuu
+                Avv += P * (w * Njvv)
+                Wvv += w * Njvv
+                Auv += P * (w * Niujv)
+                Wuv += w * Niujv
+
+        if abs(W) <= 1e-10:
+            return self._evaluate_derivatives_finite_diff(u, v)
+
+        invW = 1.0 / W
+        S = A * invW
+        Su = (Au - A * (Wu * invW)) * invW
+        Sv = (Av - A * (Wv * invW)) * invW
+
+        Suu = (Auu - 2 * Au * Wu * invW - A * Wuu * invW + 2 * A * Wu * Wu * invW * invW) * invW
+        Svv = (Avv - 2 * Av * Wv * invW - A * Wvv * invW + 2 * A * Wv * Wv * invW * invW) * invW
+        Suv = (Auv - Au * Wv * invW - Av * Wu * invW - A * Wuv * invW + 2 * A * Wu * Wv * invW * invW) * invW
+
+        if not np.all(np.isfinite(S)):
+            return self._evaluate_derivatives_finite_diff(u, v)
+        for arr in (Su, Sv, Suu, Suv, Svv):
+            if not np.all(np.isfinite(arr)):
+                return self._evaluate_derivatives_finite_diff(u, v)
+
+        return S, Su, Sv, Suu, Suv, Svv
+
     def evaluate_derivative(self, u: float, v: float, du: int = 1, dv: int = 1) -> np.ndarray:
         """
         计算NURBS曲面在指定点的导数
@@ -179,26 +376,14 @@ class NURBSProcessor:
     
     def calculate_normal(self, u: float, v: float) -> np.ndarray:
         """
-        计算NURBS曲面上指定点的法线
+        计算NURBS曲面上指定点的法线（解析方法）
         Args:
             u: U方向参数
             v: V方向参数
         Returns:
             法线向量
         """
-        # 计算一阶偏导数
-        du = self.evaluate_derivative(u, v, du=1, dv=0)
-        dv = self.evaluate_derivative(u, v, du=0, dv=1)
-        
-        # 计算叉积
-        normal = np.cross(du, dv)
-        
-        # 归一化
-        norm = np.linalg.norm(normal)
-        if norm > 1e-8:
-            return normal / norm
-        else:
-            return np.array([0, 0, 1])
+        return self.calculate_normal_analytic(u, v)
     
     def calculate_plane_normal(self) -> np.ndarray:
         """
@@ -275,75 +460,118 @@ class NURBSProcessor:
         # 注意：这里需要根据实际圆锥参数调整
         # 简化实现：使用偏导数叉积
         return self.calculate_normal(u, v)
-    
-    def calculate_curvature(self, u: float, v: float) -> Tuple[float, float]:
+
+    def calculate_normal_analytic(self, u: float, v: float) -> np.ndarray:
         """
-        计算NURBS曲面上指定点的主曲率
+        计算NURBS曲面上指定点的法线（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            法线向量
+        """
+        _, Su, Sv, _, _, _ = self.evaluate_derivatives(u, v)
+        normal = np.cross(Su, Sv)
+        norm = np.linalg.norm(normal)
+        if norm > 1e-8:
+            return normal / norm
+        else:
+            return np.array([0, 0, 1])
+
+    def calculate_curvature_analytic(self, u: float, v: float) -> Tuple[float, float]:
+        """
+        计算NURBS曲面上指定点的主曲率（解析方法）
         Args:
             u: U方向参数
             v: V方向参数
         Returns:
             (k1, k2): 主曲率
         """
-        # 计算一阶偏导数
-        du = self.evaluate_derivative(u, v, du=1, dv=0)
-        dv = self.evaluate_derivative(u, v, du=0, dv=1)
-        
-        # 计算二阶偏导数
-        ddu = self.evaluate_derivative(u, v, du=2, dv=0)
-        ddv = self.evaluate_derivative(u, v, du=0, dv=2)
-        dudv = self.evaluate_derivative(u, v, du=1, dv=1)
-        
-        # 计算法线
-        normal = self.calculate_normal(u, v)
-        
-        # 计算第一基本形式
-        E = np.dot(du, du)
-        F = np.dot(du, dv)
-        G = np.dot(dv, dv)
-        
-        # 计算第二基本形式
-        L = np.dot(ddu, normal)
-        M = np.dot(dudv, normal)
-        N = np.dot(ddv, normal)
-        
-        # 计算主曲率
-        denominator = E*G - F*F
+        _, Su, Sv, Suu, Suv, Svv = self.evaluate_derivatives(u, v)
+
+        E = np.dot(Su, Su)
+        F = np.dot(Su, Sv)
+        G = np.dot(Sv, Sv)
+
+        n_vec = np.cross(Su, Sv)
+        n_norm = np.linalg.norm(n_vec)
+        if n_norm < 1e-8:
+            return 0.0, 0.0
+        n = n_vec / n_norm
+
+        L = np.dot(Suu, n)
+        M = np.dot(Suv, n)
+        N = np.dot(Svv, n)
+
+        denominator = E * G - F * F
         if denominator < 1e-8:
             return 0.0, 0.0
-        
-        H = (E*N - 2*F*M + G*L) / (2*denominator)
-        K = (L*N - M*M) / denominator
-        
-        sqrt_val = math.sqrt(max(0, H*H - K))
-        k1 = H + sqrt_val
-        k2 = H - sqrt_val
-        
+
+        H = (E * N - 2 * F * M + G * L) / (2 * denominator)
+        K = (L * N - M * M) / denominator
+
+        sqrt_delta = math.sqrt(max(0, H * H - K))
+        k1 = H + sqrt_delta
+        k2 = H - sqrt_delta
+
         return k1, k2
-    
-    def calculate_gaussian_curvature(self, u: float, v: float) -> float:
+
+    def calculate_gaussian_curvature_analytic(self, u: float, v: float) -> float:
         """
-        计算NURBS曲面上指定点的高斯曲率
+        计算NURBS曲面上指定点的高斯曲率（解析方法）
         Args:
             u: U方向参数
             v: V方向参数
         Returns:
             高斯曲率
         """
-        k1, k2 = self.calculate_curvature(u, v)
+        k1, k2 = self.calculate_curvature_analytic(u, v)
         return k1 * k2
-    
-    def calculate_mean_curvature(self, u: float, v: float) -> float:
+
+    def calculate_mean_curvature_analytic(self, u: float, v: float) -> float:
         """
-        计算NURBS曲面上指定点的平均曲率
+        计算NURBS曲面上指定点的平均曲率（解析方法）
         Args:
             u: U方向参数
             v: V方向参数
         Returns:
             平均曲率
         """
-        k1, k2 = self.calculate_curvature(u, v)
-        return (k1 + k2) / 2
+        k1, k2 = self.calculate_curvature_analytic(u, v)
+        return (k1 + k2) / 2.0
+
+    def calculate_curvature(self, u: float, v: float) -> Tuple[float, float]:
+        """
+        计算NURBS曲面上指定点的主曲率（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            (k1, k2): 主曲率
+        """
+        return self.calculate_curvature_analytic(u, v)
+    
+    def calculate_gaussian_curvature(self, u: float, v: float) -> float:
+        """
+        计算NURBS曲面上指定点的高斯曲率（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            高斯曲率
+        """
+        return self.calculate_gaussian_curvature_analytic(u, v)
+
+    def calculate_mean_curvature(self, u: float, v: float) -> float:
+        """
+        计算NURBS曲面上指定点的平均曲率（解析方法）
+        Args:
+            u: U方向参数
+            v: V方向参数
+        Returns:
+            平均曲率
+        """
+        return self.calculate_mean_curvature_analytic(u, v)
     
     def generate_mesh(self, resolution_u: int = 50, resolution_v: int = 50) -> o3d.geometry.TriangleMesh:
         """
@@ -462,7 +690,7 @@ class NURBSProcessor:
         
         # 节点向量
         # U向节点向量 (圆周方向)
-        knots_u = np.array([0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1, 1])
+        knots_u = np.array([0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1, 1, 1, 1])
         # V向节点向量 (高度方向)
         knots_v = np.array([0, 0, 1, 1])
         
@@ -490,12 +718,14 @@ class NURBSProcessor:
                 control_points[i, j] = [x, y, z]
         
         # 创建节点向量
-        knots_u = np.linspace(0, 1, resolution - 3)
-        knots_v = np.linspace(0, 1, resolution - 3)
-        
-        # 扩展节点向量以满足次数要求
-        knots_u = np.concatenate([[0, 0, 0], knots_u, [1, 1, 1]])
-        knots_v = np.concatenate([[0, 0, 0], knots_v, [1, 1, 1]])
+        n_u = resolution
+        n_v = resolution
+        degree_u = 3
+        degree_v = 3
+        internal_u = np.linspace(0, 1, n_u - degree_u + 1)[1:-1]
+        internal_v = np.linspace(0, 1, n_v - degree_v + 1)[1:-1]
+        knots_u = np.concatenate([np.zeros(degree_u + 1), internal_u, np.ones(degree_u + 1)])
+        knots_v = np.concatenate([np.zeros(degree_v + 1), internal_v, np.ones(degree_v + 1)])
         
         return NURBSProcessor(control_points, knots_u, knots_v, 3, 3)
     
@@ -524,11 +754,13 @@ class NURBSProcessor:
                 control_points[i, j] = [x, y, z]
         
         # 创建节点向量
-        knots_u = np.linspace(0, 1, resolution_u - 3)
-        knots_v = np.linspace(0, 1, resolution_v - 3)
-        
-        # 扩展节点向量以满足次数要求
-        knots_u = np.concatenate([[0, 0, 0], knots_u, [1, 1, 1]])
-        knots_v = np.concatenate([[0, 0, 0], knots_v, [1, 1, 1]])
+        n_u = resolution_u
+        n_v = resolution_v
+        degree_u = 3
+        degree_v = 3
+        internal_u = np.linspace(0, 1, n_u - degree_u + 1)[1:-1]
+        internal_v = np.linspace(0, 1, n_v - degree_v + 1)[1:-1]
+        knots_u = np.concatenate([np.zeros(degree_u + 1), internal_u, np.ones(degree_u + 1)])
+        knots_v = np.concatenate([np.zeros(degree_v + 1), internal_v, np.ones(degree_v + 1)])
         
         return NURBSProcessor(control_points, knots_u, knots_v, 3, 3)

@@ -1,0 +1,213 @@
+"""
+稳健直纹面拟合测试脚本
+目录结构预期:
+  ./new/robustRuledFitter.py
+  ./new/newPartitoner.py
+  ./core/meshProcessor.py
+  ./tests/test_robust_fitter.py
+"""
+
+import sys
+import os
+import warnings
+import numpy as np
+import argparse
+
+# ==========================================
+# 1. 解决目录兼容性：将根目录加入 Python 路径
+# ==========================================
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+
+# 过滤无用的运行时警告
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+# 尝试导入可视化库
+try:
+    import pyvista as pv
+    PYVISTA_AVAILABLE = True
+except ImportError:
+    PYVISTA_AVAILABLE = False
+    print("警告: PyVista不可用，将只输出终端日志，不进行三维可视化。")
+
+# 导入你现有的核心模块和生成器
+try:
+    from new.newPartitoner import NewPartitioner
+    from new.robustRuledFitter import RobustRuledSurfaceFitter
+    from tests.test_geodesic_boundaries import create_test_surface
+except ImportError as e:
+    print(f"导入失败，请检查目录结构: {e}")
+    sys.exit(1)
+
+
+# ==========================================
+# 2. 专门为新算法编写的高效可视化函数
+# ==========================================
+def visualize_robust_patches(
+    vertices: np.ndarray, 
+    faces: np.ndarray, 
+    surface_grids: list, 
+    screenshot_path: str = None, 
+    interactive: bool = False
+):
+    """
+    可视化原网格与拟合出的独立直纹面片
+    :param surface_grids: 形状为 (nu, nv, 3) 的网格点集列表
+    """
+    if not PYVISTA_AVAILABLE:
+        return
+
+    plotter = pv.Plotter(off_screen=not interactive)
+
+    # 1. 渲染原始网格 (半透明灰色，作为底底)
+    mesh = pv.PolyData(vertices, np.hstack([np.full((len(faces), 1), 3), faces]))
+    plotter.add_mesh(mesh, opacity=0.3, color='lightgray', style='surface')
+
+    # 颜色表，用于区分不同的分区片
+    cmap = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    ]
+
+    # 2. 渲染生成的直纹面片
+    for i, grid_xyz in enumerate(surface_grids):
+        color = cmap[i % len(cmap)]
+        try:
+            # 使用 PyVista 的 StructuredGrid 能够完美呈现矩阵形式的三维点
+            surf = pv.StructuredGrid(
+                grid_xyz[:, :, 0],
+                grid_xyz[:, :, 1],
+                grid_xyz[:, :, 2],
+            )
+            plotter.add_mesh(
+                surf,
+                color=color,
+                opacity=0.8,
+                smooth_shading=True,
+                show_edges=True, # 开启边缘线可以清晰看到母线方向
+                edge_color='white'
+            )
+        except Exception as e:
+            print(f"  绘制面片 {i} 时出错: {e}", flush=True)
+
+    plotter.add_axes()
+    plotter.add_title("Robust Ruled Surface Fitting", font_size=12)
+
+    if screenshot_path and interactive:
+        print("弹出交互窗口，请旋转查看...")
+        plotter.show(screenshot=screenshot_path, auto_close=False)
+        print(f"截图已保存至: {screenshot_path}")
+    elif screenshot_path:
+        plotter.screenshot(screenshot_path)
+        print(f"截图已保存至: {screenshot_path}")
+    elif interactive:
+        print("弹出交互窗口，请旋转查看...")
+        plotter.show()
+    plotter.close()
+
+
+# ==========================================
+# 3. 核心测试主流程
+# ==========================================
+def run_robust_test(surface_type='cylinder', output_dir='test_output', interactive=True):
+    print(f"\n{'='*60}")
+    print(f"启动新算法测试 (Robust Ruled Fitter) - {surface_type}")
+    print(f"{'='*60}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. 构建网格
+    print("步骤 1: 生成/加载测试网格...")
+    nurbs, mesh_processor = create_test_surface(surface_type)
+    vertices = np.asarray(mesh_processor.vertices)
+    print(f"  > 顶点数: {len(vertices)}, 面数: {len(mesh_processor.faces)}")
+
+    # 2. 执行表面分区 (复用你原来的新版分区器)
+    print("\n步骤 2: 执行区域生长分区...")
+    partitioner = NewPartitioner(mesh_processor)
+    
+    # 获取平均边长计算 R_max
+    edges = np.array(mesh_processor.edge_vertices)
+    avg_edge_length = np.mean(np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1))
+    
+    optimized_benchmarks, regions_dict, _, _, _, _ = partitioner.partition_with_optimization(
+        initial_num_benchmarks=10,
+        alpha=0.8,
+        R_max=48.0 * avg_edge_length,
+        theta_attr=58.0,
+        max_iterations=20
+    )
+    
+    partitions_ordered = [regions_dict[b] for b in optimized_benchmarks]
+    print(f"  > 成功划分 {len(partitions_ordered)} 个子区域")
+
+    # 3. 直纹面拟合 (使用新算法)
+    print("\n步骤 3: 全局参数化线性拟合直纹面...")
+    
+    # 实例化新的 Fitter
+    fitter = RobustRuledSurfaceFitter(
+        vertices=vertices, 
+        degree=3, 
+        num_ctrl_pts=8, 
+        reg_weight=0.05 # 可以微调这个正则化权重，点云越嘈杂权重越大
+    )
+
+    surface_grids = []
+    total_error = 0.0
+    valid_patches = 0
+
+    for pid, region in enumerate(partitions_ordered):
+        # 兼容性处理：将 Set[int] 转换为 list
+        idx_list = list(region)
+        
+        # 过滤掉点数太少无法拟合的杂散碎块
+        if len(idx_list) < fitter.n_cp + 2:
+            print(f"  > 分区 {pid}: 点数太少 ({len(idx_list)}), 忽略.")
+            continue
+            
+        try:
+            # 拟合分区
+            fit_result = fitter.fit_partition(idx_list)
+            
+            # 生成 32 x 16 的可视化网格 (nu截面方向，nv母线方向)
+            grid_xyz = fitter.evaluate_surface(fit_result, nu=32, nv=16)
+            surface_grids.append(grid_xyz)
+            valid_patches += 1
+            print(f"  > 分区 {pid}: 拟合成功 (涵盖 {len(idx_list)} 个顶点)")
+            
+        except Exception as e:
+            print(f"  > 分区 {pid}: 拟合失败 -> {e}")
+
+    print(f"  > 拟合完成。共生成 {valid_patches} 片有效直纹面。")
+
+    # 4. 可视化
+    print("\n步骤 4: 渲染三维结果...")
+    screenshot_path = os.path.join(output_dir, f'robust_fitted_{surface_type}.png')
+    visualize_robust_patches(
+        vertices=vertices,
+        faces=np.asarray(mesh_processor.faces),
+        surface_grids=surface_grids,
+        screenshot_path=screenshot_path,
+        interactive=interactive
+    )
+    print(f"\n{'='*60}")
+    print("测试完毕。")
+    print(f"{'='*60}\n")
+
+
+if __name__ == '__main__':
+    # 修复 Windows 控制台中文乱码
+    if sys.platform == 'win32':
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except:
+            pass
+
+    parser = argparse.ArgumentParser(description='稳健直纹面新算法测试')
+    parser.add_argument('--surface', type=str, default='cylinder', choices=['cylinder', 'cone', 'wavy'], help='测试曲面类型')
+    parser.add_argument('--no_ui', action='store_true', help='关闭交互式弹窗')
+    
+    args = parser.parse_args()
+    
+    run_robust_test(surface_type=args.surface, interactive=not args.no_ui)

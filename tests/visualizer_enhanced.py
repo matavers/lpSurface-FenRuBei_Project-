@@ -87,6 +87,83 @@ def save_edge_midpoints_open3d(
     print(f"Saved edge midpoints to {output_path}")
 
 
+def visualize_boundaries_open3d(
+    mesh: o3d.geometry.TriangleMesh,
+    partitions: List[Set[int]],
+    vertex_to_partitions: Dict[int, List[int]],
+    benchmarks: List[int],
+    window_name: str = "分区边缘中点"
+):
+    """
+    使用 Open3D 显示分区边缘的中点（简化版，确保可交互）
+    
+    Args:
+        mesh: Open3D 网格对象
+        partitions: 分区列表（保留参数以兼容旧调用）
+        vertex_to_partitions: 顶点到分区映射（保留参数以兼容旧调用）
+        benchmarks: 基准点索引列表
+        window_name: 窗口标题
+    """
+    # 创建可视化对象列表
+    geometries = []
+    
+    # 添加网格（半透明灰色）
+    mesh_copy = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(np.asarray(mesh.vertices)),
+        o3d.utility.Vector3iVector(np.asarray(mesh.triangles))
+    )
+    mesh_copy.paint_uniform_color([0.8, 0.8, 0.8])  # 浅灰色
+    mesh_copy.compute_vertex_normals()
+    geometries.append(mesh_copy)
+    
+    # 获取顶点坐标
+    vertices = np.asarray(mesh.vertices)
+    
+    # 提取边缘中点（从顶点到分区映射中计算）
+    # 边缘点定义：属于多个分区的顶点
+    edge_vertex_indices = []
+    for v, pids in vertex_to_partitions.items():
+        if len(pids) >= 2:
+            edge_vertex_indices.append(v)
+    
+    # 添加边缘中点（绿色点云）
+    if edge_vertex_indices:
+        edge_points = vertices[edge_vertex_indices]
+        edge_pcd = o3d.geometry.PointCloud()
+        edge_pcd.points = o3d.utility.Vector3dVector(edge_points)
+        
+        # 设置绿色
+        green_color = np.tile([0.0, 0.8, 0.0], (len(edge_points), 1))
+        edge_pcd.colors = o3d.utility.Vector3dVector(green_color)
+        geometries.append(edge_pcd)
+    
+    # 添加基准点（红色点云）
+    if benchmarks and len(benchmarks) > 0:
+        benchmark_points = vertices[benchmarks]
+        benchmark_pcd = o3d.geometry.PointCloud()
+        benchmark_pcd.points = o3d.utility.Vector3dVector(benchmark_points)
+        
+        # 设置红色
+        red_color = np.tile([1.0, 0.0, 0.0], (len(benchmark_points), 1))
+        benchmark_pcd.colors = o3d.utility.Vector3dVector(red_color)
+        geometries.append(benchmark_pcd)
+    
+    # 使用 draw_geometries 显示（简单可靠，确保可交互）
+    print(f"\n打开可视化窗口: {window_name}")
+    print("交互操作：")
+    print("  - 鼠标左键：旋转视角")
+    print("  - 鼠标滚轮：缩放")
+    print("  - 鼠标右键：平移")
+    print("  - Q 键：关闭窗口")
+    
+    o3d.visualization.draw_geometries(
+        geometries,
+        window_name=window_name,
+        width=1024,
+        height=768
+    )
+
+
 def visualize_interactive(
     mesh: o3d.geometry.TriangleMesh,
     vertex_to_partitions: Dict[int, List[int]],

@@ -1,5 +1,7 @@
 """
-简化的分区测试脚本 - 优化后自动可视化
+简化的分区测试脚本 - PyVista 增强可视化
+- 覆盖次数热力图底色
+- 彩色分区边界线
 """
 import sys
 import os
@@ -7,20 +9,19 @@ import time
 import numpy as np
 import argparse
 from typing import Dict, List
+from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.meshProcessor import MeshProcessor
-from new import NewPartitioner, BasePointInitializer
+from new import NewPartitioner
+from new import BasePointInitializer
 
 from geometry_generators import generate_cylinder, generate_cone, generate_wavy_plane
 from tests.metrics import evaluate_full_partition, print_metrics_summary
-from tests.visualizer_enhanced import (
-    save_complete_visualization,
-    create_summary_report,
-    visualize_interactive
-)
 from tests.visualizers import plot_convergence_curve, plot_parameter_sensitivity
+from tests.visualizer_enhanced import save_complete_visualization, create_summary_report, visualize_boundaries_open3d
+from tests.visualizer_pyvista import save_pyvista_visualization, PYVISTA_AVAILABLE
 
 
 def wrap_mesh_with_processor(trimesh_mesh) -> MeshProcessor:
@@ -50,11 +51,11 @@ def test_single_shape(
     sampling_method: str = 'uniform',
     max_iterations: int = 50,
     output_dir: str = 'test_output',
-    interactive: bool = False,
-    auto_view: bool = True
+    auto_view: bool = True,
+    use_pyvista: bool = True
 ) -> Dict:
     """
-    测试单个形状的完整流程（简化版：直接优化 + 自动可视化）
+    测试单个形状的完整流程
     
     Args:
         name: 形状名称
@@ -66,8 +67,8 @@ def test_single_shape(
         sampling_method: 采样方法
         max_iterations: 最大迭代次数
         output_dir: 输出目录
-        interactive: 是否启用交互式可视化
         auto_view: 是否在完成后自动打开可视化
+        use_pyvista: 是否使用 PyVista 增强可视化
         
     Returns:
         结果字典
@@ -114,8 +115,8 @@ def test_single_shape(
     print_metrics_summary(metrics_opt, "Optimized Results")
     results["optimized"] = metrics_opt
     
-    # 保存可视化结果
-    print(f"\n--- Saving visualizations ---")
+    # 保存 Open3D 可视化结果（PLY 文件）
+    print(f"\n--- Saving Open3D visualizations ---")
     save_complete_visualization(
         mesh_processor.mesh,
         list(regions_dict_opt.values()),
@@ -124,7 +125,7 @@ def test_single_shape(
         opt_benchmarks,
         final_coverage,
         os.path.join(output_dir, f"{name}"),
-        interactive=False  # 稍后统一处理
+        interactive=False
     )
     
     # 创建摘要报告
@@ -134,21 +135,46 @@ def test_single_shape(
         os.path.join(output_dir, f"{name}_report.txt")
     )
     
+    # PyVista 增强可视化（热力图 + 边界 + 边界专用窗口）
+    if use_pyvista and PYVISTA_AVAILABLE:
+        print(f"\n--- Saving PyVista heatmap visualization ---")
+        
+        # 获取顶点和面数据
+        vertices = np.asarray(mesh_processor.mesh.vertices)
+        faces = np.asarray(mesh_processor.mesh.triangles)
+        
+        # 保存 PyVista 可视化（显示热力图窗口 + 第二个边界专用窗口）
+        save_pyvista_visualization(
+            vertices=vertices,
+            faces=faces,
+            partitions=list(regions_dict_opt.values()),
+            vertex_to_partitions=vertex_to_partitions_opt,
+            edge_midpoints=edge_midpoints_opt,
+            benchmarks=opt_benchmarks,
+            coverage=final_coverage,
+            output_prefix=os.path.join(output_dir, f"{name}"),
+            interactive=auto_view,
+            show_boundaries_only=True  # 使用 PyVista 显示第二个边界窗口
+        )
+    elif use_pyvista and not PYVISTA_AVAILABLE:
+        print(f"\n--- PyVista not available, skipping enhanced visualization ---")
+    
+    # 仅在 PyVista 不可用时才使用 Open3D 边界窗口
+    if auto_view and (not use_pyvista or not PYVISTA_AVAILABLE):
+        print(f"\n--- Opening Open3D boundary visualization ---")
+        print(f"窗口 2: 分区边界（彩色）")
+        print("按 Q 或点击窗口关闭按钮退出")
+        visualize_boundaries_open3d(
+            mesh=mesh_processor.mesh,
+            partitions=list(regions_dict_opt.values()),
+            vertex_to_partitions=vertex_to_partitions_opt,
+            benchmarks=opt_benchmarks,
+            window_name=f"分区边界 - {name}"
+        )
+    
     total_time = time.time() - start_time
     results["total_time"] = total_time
     print(f"\nTotal time: {total_time:.2f} seconds")
-    
-    # 自动打开可视化
-    if auto_view:
-        print(f"\n--- Opening interactive visualization ---")
-        print(f"Press Q to exit, use mouse to rotate/zoom/pan")
-        visualize_interactive(
-            mesh_processor.mesh,
-            vertex_to_partitions_opt,
-            edge_midpoints_opt,
-            opt_benchmarks,
-            window_name=f"Partition: {name}"
-        )
     
     return results
 
@@ -225,32 +251,57 @@ def test_parameter_sensitivity(
     return results
 
 
+def get_timestamped_output_dir(base_dir="new_output"):
+    """
+    创建带时间戳的输出目录
+    
+    Args:
+        base_dir: 基础目录 (默认: new_output)
+    
+    Returns:
+        带时间戳的输出目录路径
+    """
+    # 生成时间戳：YYYY-MM-DD_HH-MM-SS
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # 创建完整路径
+    output_dir = os.path.join(base_dir, timestamp)
+    # 确保目录存在
+    os.makedirs(output_dir, exist_ok=True)
+    
+    return output_dir
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="分区算法测试 - 优化后自动可视化",
+        description="分区算法测试 - PyVista 增强可视化（热力图 + 彩色边界）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
-  # 快速测试单个形状（自动打开可视化）
+Features:
+  - Coverage heatmap: plasma colormap (blue -> yellow -> red)
+  - Partition boundaries: colored lines showing partition edges
+  - Interactive 3D: rotate, zoom, pan with mouse
+
+Examples:
+  # Basic test (auto visualization)
   python .\\tests\\test_new_full_pipeline.py --shapes cylinder
 
-  # 测试多个形状
+  # Multiple shapes
   python .\\tests\\test_new_full_pipeline.py --shapes cylinder cone wavy_plane
 
-  # 完整测试（包含参数敏感性分析）
-  python .\\tests\\test_new_full_pipeline.py --shapes cylinder cone wavy_plane --full
+  # Disable PyVista (use only Open3D)
+  python .\\tests\\test_new_full_pipeline.py --shapes cylinder --no-pyvista
 
-  # 禁用自动可视化（只生成文件）
+  # Disable auto visualization (files only)
   python .\\tests\\test_new_full_pipeline.py --shapes cylinder --no-view
 
-  # 指定输出目录
-  python .\\tests\\test_new_full_pipeline.py --shapes cylinder --output-dir my_results
+  # Full test with sensitivity analysis
+  python .\\tests\\test_new_full_pipeline.py --shapes cylinder --full
         """
     )
-    
+
     parser.add_argument(
-        "--output-dir", type=str, default="test_output",
-        help="输出目录 (默认: test_output)"
+        "--base-dir", type=str, default="new_output",
+        help="基础输出目录 (默认: new_output)"
     )
     parser.add_argument(
         "--quick", action="store_true",
@@ -263,6 +314,10 @@ def main():
     parser.add_argument(
         "--no-view", action="store_true",
         help="禁用自动可视化 (只生成文件)"
+    )
+    parser.add_argument(
+        "--no-pyvista", action="store_true",
+        help="禁用 PyVista 增强可视化"
     )
     parser.add_argument(
         "--shapes", type=str, nargs="+",
@@ -281,17 +336,17 @@ def main():
         "--benchmarks", type=int, default=None,
         help="初始基准点数量 (默认: 自动)"
     )
-    
+
     args = parser.parse_args()
-    
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
+
+    # 获取带时间戳的输出目录
+    output_dir = get_timestamped_output_dir(args.base_dir)
     
     # 参数设置
     max_iterations = 20 if args.quick else 50
     initial_num_benchmarks = args.benchmarks if args.benchmarks else (15 if args.quick else 20)
     auto_view = not args.no_view
-    interactive = auto_view  # 统一使用
+    use_pyvista = not args.no_pyvista
     
     shape_generators = {
         "cylinder": generate_cylinder,
@@ -301,8 +356,22 @@ def main():
     
     all_results = {}
     
+    # PyVista 可视化说明
+    if use_pyvista and PYVISTA_AVAILABLE:
+        print(f"\n{'=' * 80}")
+        print(f"PyVista Enhanced Visualization")
+        print(f"{'=' * 80}")
+        print(f"- Coverage heatmap: plasma colormap (blue -> yellow -> red)")
+        print(f"- Partition boundaries: colored lines showing partition edges")
+        print(f"- Interactive 3D: rotate, zoom, pan with mouse")
+        print(f"{'=' * 80}\n")
+    elif use_pyvista and not PYVISTA_AVAILABLE:
+        print(f"\nWarning: PyVista not installed.")
+        print(f"Install with: pip install pyvista")
+        print(f"Running without PyVista visualization...\n")
+    
     print(f"\n{'=' * 80}")
-    print(f"分区算法测试")
+    print(f"Partition Algorithm Test")
     print(f"{'=' * 80}")
     print(f"Output directory: {output_dir}")
     print(f"Max iterations: {max_iterations}")
@@ -332,8 +401,8 @@ def main():
             initial_num_benchmarks=initial_num_benchmarks,
             max_iterations=max_iterations,
             output_dir=output_dir,
-            interactive=interactive,
-            auto_view=auto_view
+            auto_view=auto_view,
+            use_pyvista=use_pyvista
         )
         
         all_results[shape_name] = results
@@ -365,9 +434,11 @@ def main():
     print(f"{'=' * 80}\n")
     
     # 提示用户如何查看结果
-    print("To view saved results later:")
-    print(f"  python .\\tests\\visualize_existing.py --scan {output_dir}")
-    print(f"  python .\\tests\\visualize_existing.py --prefix <result_name> --dir {output_dir}")
+    print("To view saved results:")
+    print(f"  - Open3D PLY files: MeshLab or Open3D")
+    if PYVISTA_AVAILABLE:
+        print(f"  - PyVista HTML (interactive): Open in browser")
+    print(f"  - Screenshots: PNG files in {output_dir}")
 
 
 if __name__ == "__main__":

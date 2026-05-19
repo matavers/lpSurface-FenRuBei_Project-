@@ -79,7 +79,7 @@ class MeshProcessor:
         
         # 边去重
         # 使用结构化数组进行高效去重
-        edges_struct = np.core.records.fromarrays(edges.T, dtype=[('v0', 'i4'), ('v1', 'i4')])
+        edges_struct = np.rec.fromarrays(edges.T, dtype=[('v0', 'i4'), ('v1', 'i4')])
         unique_edges_struct, indices = np.unique(edges_struct, return_index=True)
         
         # 转换回普通数组

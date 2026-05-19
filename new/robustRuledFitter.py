@@ -1,0 +1,180 @@
+import numpy as np
+
+class RobustRuledSurfaceFitter:
+    """
+    稳健的直纹面拟合器 (基于全局参数化与线性最小二乘)
+    放弃提取不规则边界，直接对全量点云进行线性方程联立求解。
+    """
+    def __init__(self, vertices: np.ndarray, degree: int = 3, num_ctrl_pts: int = 8, reg_weight: float = 0.05):
+        self.vertices = np.asarray(vertices)
+        self.degree = degree
+        self.n_cp = max(degree + 1, num_ctrl_pts)
+        self.reg_weight = reg_weight # 正则化权重，用于使曲线平滑
+
+    def _compute_knot_vector(self) -> np.ndarray:
+        """生成标准的开放均匀节点向量 (Open Uniform Knot Vector)"""
+        n = self.n_cp
+        p = self.degree
+        knots = np.zeros(n + p + 1)
+        knots[p+1:n] = np.linspace(0, 1, n - p + 1)[1:-1]
+        knots[n:] = 1.0
+        return knots
+
+    def _basis_functions(self, u: float, knots: np.ndarray) -> np.ndarray:
+        """计算给定参数 u 下的所有 B 样条基函数 N_{i, p}(u)"""
+        n = self.n_cp
+        p = self.degree
+        N = np.zeros(n)
+        
+        if u >= 1.0:
+            N[-1] = 1.0
+            return N
+        if u <= 0.0:
+            N[0] = 1.0
+            return N
+
+        # 找到所属的节点区间
+        span = p
+        for i in range(p, n):
+            if knots[i] <= u < knots[i+1]:
+                span = i
+                break
+
+        # 计算非零基函数
+        left = np.zeros(p + 1)
+        right = np.zeros(p + 1)
+        ndu = np.zeros((p + 1, p + 1))
+        ndu[0, 0] = 1.0
+
+        for j in range(1, p + 1):
+            left[j] = u - knots[span + 1 - j]
+            right[j] = knots[span + j] - u
+            saved = 0.0
+            for r in range(j):
+                temp = ndu[r, j - 1] / (right[r + 1] + left[j - r])
+                ndu[r, j] = saved + right[r + 1] * temp
+                saved = left[j - r] * temp
+            ndu[j, j] = saved
+
+        N[span - p : span + 1] = ndu[:, p]
+        return N
+
+    def fit_partition(self, partition_indices: list) -> dict:
+        """
+        对点云分区拟合直纹面
+        """
+        points = self.vertices[list(partition_indices)]
+        m = len(points)
+        if m < self.n_cp:
+            raise ValueError("分区点数太少，无法拟合指定控制点数的曲面")
+
+        # 1. 局部参数化 (基于 PCA)
+        mean_pt = np.mean(points, axis=0)
+        centered = points - mean_pt
+        cov = np.cov(centered, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        
+        # 排序特征值
+        idx = np.argsort(eigenvalues)[::-1]
+        eigenvectors = eigenvectors[:, idx]
+
+        # 假设最大方差方向为母线方向(v)，第二大为截面曲线方向(u)
+        v_axis = eigenvectors[:, 0]
+        u_axis = eigenvectors[:, 1]
+
+        v_proj = centered @ v_axis
+        u_proj = centered @ u_axis
+
+        # 归一化到 [0, 1] 域
+        v_min, v_max = v_proj.min(), v_proj.max()
+        u_min, u_max = u_proj.min(), u_proj.max()
+        
+        # 防止除零
+        v_params = (v_proj - v_min) / (v_max - v_min + 1e-8)
+        u_params = (u_proj - u_min) / (u_max - u_min + 1e-8)
+
+        # 2. 构建线性方程组 M * X = P
+        n = self.n_cp
+        knots = self._compute_knot_vector()
+        M = np.zeros((m, 2 * n))
+
+        for i in range(m):
+            Nu = self._basis_functions(u_params[i], knots)
+            v = v_params[i]
+            M[i, :n] = (1 - v) * Nu
+            M[i, n:] = v * Nu
+
+        # 3. Tikhonov 正则化
+        L = np.zeros((2 * n, 2 * n))
+        for i in range(1, n - 1):
+            L[i, i-1:i+2] = [1, -2, 1]
+            L[n+i, n+i-1:n+i+2] = [1, -2, 1]
+
+        # 组合矩阵并求解
+        A = np.vstack((M, self.reg_weight * L))
+        B = np.vstack((points, np.zeros((2 * n, 3))))
+
+        X, residuals, rank, s = np.linalg.lstsq(A, B, rcond=None)
+
+        C0_ctrl = X[:n]
+        C1_ctrl = X[n:]
+
+        return {
+            'C0_control_points': C0_ctrl,
+            'C1_control_points': C1_ctrl,
+            'knots': knots,
+            'degree': self.degree,
+            # 将计算好的参数域坐标保留
+            'u_params': u_params,
+            'v_params': v_params
+        }
+
+    def evaluate_surface(self, fit_result: dict, nu: int = 32, nv: int = 16) -> np.ndarray:
+        """基于拟合结果评估生成规则网格点"""
+        C0 = fit_result['C0_control_points']
+        C1 = fit_result['C1_control_points']
+        knots = fit_result['knots']
+        
+        grid = np.zeros((nu, nv, 3))
+        for i in range(nu):
+            u = i / (nu - 1) if nu > 1 else 0.5
+            Nu = self._basis_functions(u, knots)
+            
+            p0 = np.dot(Nu, C0)
+            p1 = np.dot(Nu, C1)
+            
+            for j in range(nv):
+                v = j / (nv - 1) if nv > 1 else 0.5
+                grid[i, j] = (1 - v) * p0 + v * p1
+                
+        return grid
+
+    def project_original_vertices(self, fit_result: dict) -> np.ndarray:
+        """
+        最完美的“裁剪”：直接将原始分区的顶点平滑投影到拟合出的直纹面上。
+        保留了完全一致的原始边界和点数，无需做任何距离剔除。
+        """
+        C0 = fit_result['C0_control_points']
+        C1 = fit_result['C1_control_points']
+        knots = fit_result['knots']
+        
+        # 直接拿拟合时算好的原始点的 UV 坐标
+        u_params = fit_result['u_params']
+        v_params = fit_result['v_params']
+        
+        num_points = len(u_params)
+        projected_points = np.zeros((num_points, 3))
+        
+        # 批量计算这些点在数学曲面上的新三维坐标
+        for i in range(num_points):
+            u = u_params[i]
+            v = v_params[i]
+            
+            Nu = self._basis_functions(u, knots)
+            p0 = np.dot(Nu, C0)
+            p1 = np.dot(Nu, C1)
+            
+            # 直纹面公式
+            projected_points[i] = (1 - v) * p0 + v * p1
+            
+        return projected_points
